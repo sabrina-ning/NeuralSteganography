@@ -2,7 +2,7 @@ import torch
 import numpy as np
 import bitarray
 
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import Emu3ForCausalLM, Emu3ForConditionalGeneration, AutoModelForCausalLM, AutoTokenizer, AutoModel
 
 def decode(self, token_ids, **kwargs):
     filtered_tokens = self.convert_ids_to_tokens(token_ids)
@@ -75,12 +75,19 @@ def get_model(seed=1234, model_name='gpt2'):
     torch.cuda.manual_seed(seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    enc = AutoTokenizer.from_pretrained(model_name)
+    enc = AutoTokenizer.from_pretrained(
+        model_name,
+        trust_remote_code=True,
+        device_map="auto")
     enc.unk_token = None
     enc.bos_token = None
     enc.eos_token = None
     
-    model = AutoModelForCausalLM.from_pretrained(model_name)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name, 
+        torch_dtype=torch.float16,
+        trust_remote_code=True,
+        device_map="auto")
     model.to(device)
     model.eval()
     # model.double()
