@@ -1,18 +1,19 @@
+from PIL import Image
 import torch
 import numpy as np
 import bitarray
 
-from transformers import Emu3ForCausalLM, Emu3ForConditionalGeneration, AutoModelForCausalLM, AutoTokenizer, AutoModel
+from transformers import Emu3ForCausalLM, AutoModelForCausalLM, AutoTokenizer, AutoModel, AutoImageProcessor, Emu3ForConditionalGeneration, Emu3Processor, AutoProcessor, GPT2TokenizerFast
 
 def decode(self, token_ids, **kwargs):
     filtered_tokens = self.convert_ids_to_tokens(token_ids)
     text = self.convert_tokens_to_string(filtered_tokens)
     return text
-AutoTokenizer.decode = decode
+GPT2TokenizerFast.decode = decode
 
 def _convert_token_to_id(self, token):
     return self.encoder.get(token, 0)
-AutoTokenizer._convert_token_to_id = _convert_token_to_id
+GPT2TokenizerFast._convert_token_to_id = _convert_token_to_id
 
 
 # handles both old and new cache formats
@@ -63,8 +64,13 @@ def num_same_from_beg(bits1, bits2):
             break
     return i
 
+def encode(processor, text):
+    encoded = processor(text=text, return_tensors="pt")
+    return encoded['input_ids'][0].tolist()
+
 def encode_context(raw_text, enc):
     context_tokens = enc.encode('<|endoftext|>') + enc.encode(raw_text)
+    # context_tokens = encode(enc, '<|endoftext|>') + encode(enc, raw_text)
     return context_tokens
 
 # Use gpt2-medium for 345M param model
@@ -74,21 +80,28 @@ def get_model(seed=1234, model_name='gpt2'):
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    enc = AutoTokenizer.from_pretrained(
-        model_name,
-        trust_remote_code=True,
-        device_map="auto")
-    enc.unk_token = None
-    enc.bos_token = None
-    enc.eos_token = None
     
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name, 
-        torch_dtype=torch.float16,
-        trust_remote_code=True,
-        device_map="auto")
-    model.to(device)
+    if "hf" in model_name:
+        enc = AutoTokenizer.from_pretrained(
+            "BAAI/Emu3-Chat",
+            trust_remote_code=True,
+            device_map="cuda:0")
+        model = Emu3ForConditionalGeneration.from_pretrained(
+            model_name, 
+            torch_dtype=torch.float16,
+            trust_remote_code=True,
+            device_map="cuda:0")
+    else:
+        enc = AutoProcessor.from_pretrained(
+            model_name,
+            trust_remote_code=True,
+            device_map="cuda:0")
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name, 
+            torch_dtype=torch.float16,
+            trust_remote_code=True,
+            device_map="cuda:0")
+    # model.to(device)
     model.eval()
     # model.double()
 
@@ -119,3 +132,39 @@ def expansion_ratio(message, encoded):
     encoded_ba.frombytes(encoded.encode('utf-8'))
     encoded_bits = len(encoded_ba.tolist())
     return encoded_bits/message_bits
+
+# converts raw image into tokens in LM vocab
+def encode_image(image_path, vision_enc, image_proc):
+    image = Image.open(image_path).convert("RGB")
+    image_tensors = image_proc(image, return_tensors="pt")["pixel_values"].to(torch.float16).cuda()
+    print(image_tensors.shape) # [1, 3, 512, 512]
+    with torch.no_grad():
+        visual_tokens = vision_enc.encode(image_tensors)
+        print(visual_tokens.shape) # [1, 64, 64]
+    tokens = visual_tokens + 151854 # offset by ID of visual token 0
+    return tokens
+
+# converts tokens in LM vocab into raw image and saves to image path
+def decode_image(tokens, image_path, vision_enc, image_proc):
+    visual_tokens = tokens - 151854 # undo offset by ID of visual token 0
+    with torch.no_grad():
+        recon = vision_enc.decode(visual_tokens.view(1, 16, 16))
+    recon = recon.view(-1, *recon.shape[2:])
+    recon_image = image_proc.postprocess(recon)["pixel_values"][0]
+    recon_image.save(image_path)
+
+def get_vision_tokenizer(model_name="BAAI/Emu3-VisionTokenizer"):
+    image_proc = AutoImageProcessor.from_pretrained(
+        model_name,
+        trust_remote_code=True,
+        device_map="cuda:0")
+    print("Loaded image processor")
+    
+    vision_enc = AutoModel.from_pretrained(
+        model_name,
+        torch_dtype=torch.float16,
+        trust_remote_code=True,
+        device_map="cuda:0").eval()
+    print("Loaded vision tokenizer")
+    
+    return image_proc, vision_enc

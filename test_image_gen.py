@@ -14,12 +14,6 @@ np.set_printoptions(threshold=np.inf)
 
 ## ===== SETUP =====
 
-seed = 12345
-torch.random.manual_seed(seed)
-torch.cuda.manual_seed(seed)
-torch.backends.cudnn.deterministic = True
-torch.backends.cudnn.benchmark = False
-
 model_id = "BAAI/Emu3-Gen-hf"
 model = Emu3ForConditionalGeneration.from_pretrained(
     model_id, 
@@ -42,8 +36,17 @@ inputs = processor(
 NUM_PROMPT_TOKENS = inputs["input_ids"].shape[1]
 # print(NUM_PROMPT_TOKENS)
 HEIGHT, WIDTH = inputs["image_sizes"][0] # output image dimensions (90, 90)
+TOTAL_TOKENS = HEIGHT * (WIDTH + 1)
+
 VISUAL_TOKENS = base_model.vocabulary_mapping.image_tokens # [151854, 184621]
 VISUAL_TOKEN_START = 151854
+
+# special tokens
+eof_token_id = processor.tokenizer.eof_token_id
+eoi_token_id = processor.tokenizer.eoi_token_id
+eos_token_id = processor.tokenizer.eos_token_id
+
+## ====================
 
 # enforce valid image structure
 def prefix_allowed_tokens_fn(batch_id, input_ids):
@@ -77,8 +80,12 @@ def generate_tokens(model, context, num_tokens, temp=1.0, topk=2048):
     output = context
     past = None
 
-    for i in range(num_tokens):
-        eol_token_id = processor.tokenizer.encode("<|extra_200|>", return_tensors="pt")[0].cuda()
+    eol_token_id = processor.tokenizer.encode("<|extra_200|>", return_tensors="pt")[0].cuda()
+
+    for i in range(TOTAL_TOKENS):
+        if i < TOTAL_TOKENS - num_tokens:
+            print(torch.multinomial([0]*topk, num_samples=1))
+            continue
 
         offset = i + 1
         with torch.no_grad():
@@ -93,8 +100,8 @@ def generate_tokens(model, context, num_tokens, temp=1.0, topk=2048):
                 logits_temp = logits / temp
                 probs = F.softmax(logits_temp, dim=-1)
                 topk_probs, topk_indices = torch.topk(probs, topk)
-                if i < 100:
-                    print(torch.multinomial(topk_probs, num_samples=1))
+                if i < TOTAL_TOKENS - num_tokens + 50:
+                    print(" ", torch.multinomial(topk_probs, num_samples=1))
                 prev = topk_indices[torch.multinomial(topk_probs, num_samples=1)]
                 # breakpoint()
                 prev += VISUAL_TOKEN_START
@@ -104,12 +111,37 @@ def generate_tokens(model, context, num_tokens, temp=1.0, topk=2048):
         if i % 100 == 0:
             print(i)
 
-    print("output:", output.shape)
-    print("generated rows:", output[-num_tokens:].shape)
+    # print("output:", output.shape)
+    # print("generated rows:", output[-num_tokens:].shape)
     return output[NUM_PROMPT_TOKENS:]
 
 def model_generate():
-    # breakpoint()
+    seed = 1234
+    torch.random.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+    # Combine your inputs and any other generate parameters into one dictionary
+    generate_kwargs = {
+        **inputs, 
+        "max_new_tokens": 9000, 
+        "do_sample": True,
+        "num_beams": 1,
+        "temperature": 1.0,
+        "top_k": 2048
+    }
+
+    # Use the helper method to see the final configuration
+    final_generation_config, model_kwargs = model._prepare_generation_config(None, **generate_kwargs)
+
+    print("--- Final Generation Config ---")
+    print(final_generation_config)
+
+    print("\n--- Remaining Model Kwargs ---")
+    print(model_kwargs)
+    breakpoint()
+
     out = model.generate(
         **inputs,
         max_new_tokens=9000,
@@ -121,43 +153,79 @@ def model_generate():
         temperature=1.0,
         top_k=2048
     )
-    # breakpoint()
+    breakpoint()
 
     image_tokens = out.sequences[:, inputs.input_ids.shape[1]: ] # removes original prompt tokens
-    print("="*40)
+    # print("="*40)
     # print(out.sequences.cpu().numpy())
-    print(image_tokens.cpu().numpy()) # discrete tokens
-    print("="*40)
-    image = base_model.decode_image_tokens(image_tokens.cuda(), height=HEIGHT, width=WIDTH)
+    # print(image_tokens.cpu().numpy()) # discrete tokens
+    # print("="*40)
 
-    return image
+    return image_tokens # [1, 8193]
 
 def manual_generate():
+    seed = 1234
+    torch.random.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
     with torch.no_grad():
-        num_tokens = HEIGHT * (WIDTH + 1) # extra token on each line
-
         context = inputs["input_ids"][0]
+        gen_tokens = generate_tokens(model, context, TOTAL_TOKENS)
 
-        gen = generate_tokens(model, context, num_tokens)
-
-        eof_token_id = processor.tokenizer.eof_token_id
-        eoi_token_id = processor.tokenizer.eoi_token_id
-        eos_token_id = processor.tokenizer.eos_token_id
         end_tokens = torch.tensor([eof_token_id, eoi_token_id, eos_token_id], device="cuda")
-        
-        gen = torch.cat([gen, end_tokens], dim=0)
+        image_tokens = torch.cat([gen_tokens, end_tokens], dim=0)
 
-        print(gen.cpu().numpy())
+        # print(gen.cpu().numpy())
         # print(gen)
-        image = base_model.decode_image_tokens(gen.unsqueeze(0).cuda(), height=HEIGHT, width=WIDTH)
-        
-    return image
 
-# image = model_generate()
-image = manual_generate()
+    return image_tokens.unsqueeze(0)
 
-image = processor.image_processor.postprocess(image, return_tensors="PIL.Image.Image")['pixel_values'][0]
-image.save("result_new.png")
+# directly takes in image as visual tokens
+def reconstruct(image_tokens):
+    seed = 1234
+    torch.random.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+    with torch.no_grad():
+        ROWS_TO_PREDICT = 8
+        TOKENS_PER_ROW = 91
+        num_tokens = ROWS_TO_PREDICT * TOKENS_PER_ROW
+
+        prompt = inputs["input_ids"][0]
+        context = torch.cat([prompt, image_tokens[:-(num_tokens+3)]]) # disregard 3 special end tokens
+
+        rec_tokens = generate_tokens(model, context, num_tokens)
+        end_tokens = torch.tensor([eof_token_id, eoi_token_id, eos_token_id], device="cuda")
+        rec_image_tokens = torch.cat([rec_tokens, end_tokens], dim=0)
+    
+    return rec_image_tokens.unsqueeze(0) # [1, 8193]
+
+## ====================
+
+# image_tokens = model_generate()
+image_tokens = manual_generate()
+print("="*40 + " image tokens " + "="*40)
+print(image_tokens.cpu().numpy())
+print(image_tokens.shape)
+print("="*40)
+
+rec_image_tokens = reconstruct(image_tokens[0].cuda())
+print("="*40 + " rec image tokens " + "="*40)
+print(rec_image_tokens.cpu().numpy())
+print(rec_image_tokens.shape)
+print("="*40)
+
+image_pixels = base_model.decode_image_tokens(image_tokens, height=HEIGHT, width=WIDTH)
+image = processor.image_processor.postprocess(image_pixels, return_tensors="PIL.Image.Image")['pixel_values'][0]
+image.save("result.png")
+
+rec_image_pixels = base_model.decode_image_tokens(rec_image_tokens, height=HEIGHT, width=WIDTH)
+rec_image = processor.image_processor.postprocess(rec_image_pixels, return_tensors="PIL.Image.Image")['pixel_values'][0]
+rec_image.save("result_recon.png")
 
 end = time.time()
 print(f"Took {end - start:.2f} sec")

@@ -2,10 +2,11 @@ import torch
 import torch.nn.functional as F
 from transformers import DynamicCache
 
-from utils import limit_past, kl, entropy, bits2int, int2bits, is_sent_finish, num_same_from_beg
+from utils import limit_past, kl, entropy, bits2int, int2bits, is_sent_finish, num_same_from_beg, encode
 
 def encode_arithmetic(model, enc, message, context, finish_sent=False, device='cuda', temp=1.0, precision=16, topk=50000):
     context = torch.tensor(context, device=device, dtype=torch.long)
+    # print(context)
 
     max_val = 2**precision
     # threshold = 2**(-precision)
@@ -26,16 +27,19 @@ def encode_arithmetic(model, enc, message, context, finish_sent=False, device='c
         i = 0
         sent_finish = False
         while i < len(message) or (finish_sent and not sent_finish):
-            out = model(prev.unsqueeze(0), past_key_values=DynamicCache.from_legacy_cache(past), use_cache=True)
+            out = model(input_ids=prev.unsqueeze(0), past_key_values=DynamicCache.from_legacy_cache(past), use_cache=True)
             logits = out.logits
             past = out.past_key_values
             # past = limit_past(past)
 
-            logits[0, -1, 151643] = -1e4 # endoftext token can't happen
-            logits[0, -1, 271] = -1e4 # 2 newlines token can't happen
+            # logits[0, -1, 50256] = -1e4
+            # logits[0, -1, 628] = -1e4
+            logits[0, -1, 151643] = -1e4 # endoftext can't happen
+            logits[0, -1, 271] = -1e4 # 2 newlines can't happen
             logits[0, -1, 151850] = -1e4 # endofsequence token can't happen
 
-            logits, indices = logits[0, -1, :].sort(descending=True)
+            logits, indices = logits[0, -1, :151643].sort(descending=True) # only consider text tokens
+            # logits, indices = logits[0, -1, :].sort(descending=True)
             logits = logits.double()
             logits_temp = logits / temp
             probs_temp = F.softmax(logits_temp, dim=0)
@@ -52,6 +56,13 @@ def encode_arithmetic(model, enc, message, context, finish_sent=False, device='c
                 cur_threshold = 1/cur_int_range
                 k = min(max(2, (probs_temp < cur_threshold).nonzero()[0].item()), topk)
                 probs_temp_int = probs_temp[:k] # Cutoff all but top k
+                # DEBUGGING >>>
+                # if topk == 300:
+                #     print(f"Top-{k} tokens:")
+                #     for rank_idx in range(k):
+                #         token_id = indices[rank_idx].item()
+                #         token_text = enc.decode([token_id])
+                #         print(f"  {rank_idx}: {token_text} ({token_id})")
 
                 # Rescale to correct range
                 probs_temp_int = probs_temp_int/probs_temp_int.sum()*cur_int_range
@@ -113,7 +124,7 @@ def encode_arithmetic(model, enc, message, context, finish_sent=False, device='c
             prev = indices[selection].view(1)
             output = torch.cat((output, prev))
             # total_num += 1
-            # print(enc.decode(prev.tolist()), message_bits[:num_bits_encoded])
+            # print("encode", enc.decode(prev.tolist()), f"({prev.item()})", message_bits[:num_bits_encoded])
             
             # For text->bits->text
             partial = enc.decode(output[len(context):].tolist())
@@ -125,12 +136,20 @@ def encode_arithmetic(model, enc, message, context, finish_sent=False, device='c
     avg_Hq = total_entropy_ptau/total_num_for_stats
     words_per_bit = total_num_for_stats/i
 
+    print("encoded >>>", output[len(context):].tolist())
     return output[len(context):].tolist(), avg_NLL, avg_KL, words_per_bit, avg_Hq
 
 def decode_arithmetic(model, enc, text, context, device='cuda', temp=1.0, precision=16, topk=50000):
     # inp is a list of token indices
     # context is a list of token indices
     inp = enc.encode(text)
+    # if isinstance(text, str):
+    #     inp = encode(enc, text)
+    #     # for testing
+    #     print(enc.decode(inp))
+    # else:
+    #     inp = text
+    print("decoded >>>", inp)
     
     i = 0
     while i < len(inp):
@@ -143,6 +162,7 @@ def decode_arithmetic(model, enc, text, context, device='cuda', temp=1.0, precis
             i += 1
 
     context = torch.tensor(context, device=device, dtype=torch.long)
+    # print(context)
 
     max_val = 2**precision
     # threshold = 2**(-precision)
@@ -154,16 +174,19 @@ def decode_arithmetic(model, enc, text, context, device='cuda', temp=1.0, precis
     with torch.no_grad():
         i = 0
         while i < len(inp):
-            out = model(prev.unsqueeze(0), past_key_values=DynamicCache.from_legacy_cache(past), use_cache=True)
+            out = model(input_ids=prev.unsqueeze(0), past_key_values=DynamicCache.from_legacy_cache(past), use_cache=True)
             logits = out.logits
             past = out.past_key_values
             # past = limit_past(past)
 
+             # logits[0, -1, 50256] = -1e4
+            # logits[0, -1, 628] = -1e4
             logits[0, -1, 151643] = -1e4 # endoftext can't happen
             logits[0, -1, 271] = -1e4 # 2 newlines can't happen
             logits[0, -1, 151850] = -1e4 # endofsequence token can't happen
 
-            logits, indices = logits[0, -1, :].sort(descending=True)
+            logits, indices = logits[0, -1, :151643].sort(descending=True)
+            # logits, indices = logits[0, -1, :].sort(descending=True)
             logits = logits.double()
             logits_temp = logits / temp
             probs_temp = F.softmax(logits_temp, dim=0)
@@ -173,6 +196,13 @@ def decode_arithmetic(model, enc, text, context, device='cuda', temp=1.0, precis
             cur_threshold = 1/cur_int_range
             k = min(max(2, (probs_temp < cur_threshold).nonzero()[0].item()), topk)
             probs_temp_int = probs_temp[:k] # Cutoff all but top k
+            # DEBUGGING >>>
+            # if topk == 300:
+            #         print(f"Top-{k} tokens:")
+            #         for rank_idx in range(k):
+            #             token_id = indices[rank_idx].item()
+            #             token_text = enc.decode([token_id])
+            #             print(f"  {rank_idx}: {token_text} ({token_id})")
 
             # Rescale to correct range
             probs_temp_int = probs_temp_int/probs_temp_int.sum()*cur_int_range
@@ -213,8 +243,10 @@ def decode_arithmetic(model, enc, text, context, device='cuda', temp=1.0, precis
                         rank = rank_idx
                         suffix = true_token_text[len(prop_token_text):]
                         suffix_tokens = enc.encode(suffix) # a list
+                        # suffix_tokens = encode(enc, suffix)
                         inp[i] = prop_token_id
                         inp[i+1:i+1] = suffix_tokens # insert suffix tokens into list
+                        print('shorter')
                         break
 
                     # Is there a more likely longer token that could be the actual token generated?
@@ -222,7 +254,7 @@ def decode_arithmetic(model, enc, text, context, device='cuda', temp=1.0, precis
                               true_token_text == prop_token_text[:len(true_token_text)]:
                         whole_text = true_token_text
                         num_extra = 1
-                        while len(whole_text) < len(prop_token_text):
+                        while len(whole_text) < len(prop_token_text) and (i+num_extra) < len(inp):
                             whole_text += enc.decode([inp[i+num_extra]])
                             num_extra += 1
                         if prop_token_text == whole_text[:len(prop_token_text)]:
@@ -234,13 +266,17 @@ def decode_arithmetic(model, enc, text, context, device='cuda', temp=1.0, precis
                             if len(whole_text) > len(prop_token_text):
                                 suffix = whole_text[len(prop_token_text):]
                                 suffix_tokens = enc.encode(suffix) # a list
+                                # suffix_tokens = encode(enc, suffix)
                                 inp[i+1:i+1] = suffix_tokens # insert suffix tokens into list
+                                print('longer')
                             break
                 else:
-                    print('Unable to fix BPE error: token received: %s=%d, text: %s' % (true_token_text, inp[i], text))
+                    # print('Unable to fix BPE error: token received: %s=%d, text: %s' % (true_token_text, inp[i], text))
+                    print('Unable to fix BPE error: token received: %s=%d' % (true_token_text, inp[i]))
                     rank = 0
             
             selection = rank
+            # print(selection)
             
             # Calculate new range as ints
             new_int_bottom = cum_probs[selection-1] if selection > 0 else cur_interval[0]
@@ -266,7 +302,7 @@ def decode_arithmetic(model, enc, text, context, device='cuda', temp=1.0, precis
             
             # Update history with new token
             prev = torch.tensor([inp[i]], device=device, dtype=torch.long)
-            # print(enc.decode([inp[i]]), new_bits)
+            # print("decode", enc.decode([inp[i]]), f"({inp[i]})", new_bits)
             i += 1
     
     return message

@@ -5,13 +5,13 @@ from PIL import Image
 from transformers import AutoModel, AutoProcessor, Emu3ForConditionalGeneration, Emu3ImageProcessor
 import ipdb
 
-ipdb.set_trace()
+# ipdb.set_trace()
 np.set_printoptions(threshold=np.inf)
 
 VISUAL_TOKEN_START = 151854
 
 # set deterministic seed
-seed = 12345
+seed = 1234
 torch.random.manual_seed(seed)
 torch.cuda.manual_seed(seed)
 torch.backends.cudnn.deterministic = True
@@ -26,6 +26,15 @@ model = Emu3ForConditionalGeneration.from_pretrained(
 )
 base_model = model.model
 processor = AutoProcessor.from_pretrained(model_id)
+
+prompt_str = "a puppy" # this is original context
+inputs = processor(
+    text=[prompt_str],
+    padding=True,
+    return_tensors="pt",
+    return_for_image_generation=True,
+).to(model.device)
+NUM_PROMPT_TOKENS = inputs["input_ids"].shape[1]
 
 HEIGHT, WIDTH = 90, 90
 
@@ -51,9 +60,10 @@ def generate_tokens(model, context, num_tokens, temp=1.0, topk=2048):
                 logits_temp = logits / temp
                 probs = F.softmax(logits_temp, dim=-1)
                 topk_probs, topk_indices = torch.topk(probs, topk)
-                print(torch.multinomial(topk_probs, num_samples=1))
+                if i < 100:
+                    print(torch.multinomial(topk_probs, num_samples=1))
                 prev = topk_indices[torch.multinomial(topk_probs, num_samples=1)]
-                breakpoint()
+                # breakpoint()
                 prev += VISUAL_TOKEN_START
 
             output = torch.cat((output, prev), dim=0)
@@ -63,15 +73,12 @@ def generate_tokens(model, context, num_tokens, temp=1.0, topk=2048):
 
     print("output:", output.shape)
     print("generated rows:", output[-num_tokens:].shape)
-    return output[10:]
+    return output[NUM_PROMPT_TOKENS:]
 
 ## ========== PREDICTING ==========
 
 image_path = "result_new.png"
 image = Image.open(image_path).convert("RGB") # returns Image object
-
-# image = torch.load("result.pt")
-# print(image.shape)
 
 image = processor.image_processor.preprocess(image, return_tensors="pt") # returns BatchFeature object
 pixel_values = image["pixel_values"].to(torch.float16).cuda()
@@ -83,17 +90,19 @@ with torch.no_grad():
 
     print("image tokens:", torch.min(image_tokens), torch.max(image_tokens))
     print(image_tokens.shape)
+    print(image_tokens.cpu().numpy())
+    image_tokens.cuda()
 
     eof_token_id = processor.tokenizer.eof_token_id
     eoi_token_id = processor.tokenizer.eoi_token_id
     eos_token_id = processor.tokenizer.eos_token_id
 
-    ROWS_TO_PREDICT = 8
+    ROWS_TO_PREDICT = 32
     TOKENS_PER_ROW = 91
     num_tokens = ROWS_TO_PREDICT * TOKENS_PER_ROW
 
-    prompt = torch.tensor([151849, 64, 41189, 151852, 24, 15, 9, 24, 15, 151851], device="cuda")
-    context = torch.cat([prompt, image_tokens[:-num_tokens]]) # (88*91)
+    prompt = inputs["input_ids"][0]
+    context = torch.cat([prompt, image_tokens[:-num_tokens]])
 
     print("="*40 + " Predicting " + "="*40)
 
@@ -108,4 +117,4 @@ with torch.no_grad():
     recon_image = base_model.decode_image_tokens(recon.unsqueeze(0).cuda(), height=HEIGHT, width=WIDTH)
 
 recon_image = processor.postprocess(recon_image, return_tensors="PIL.Image.Image")["pixel_values"][0]
-recon_image.save("result_new_recon2.png")
+recon_image.save("result_new_recon.png")
