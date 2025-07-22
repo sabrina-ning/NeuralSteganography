@@ -9,11 +9,11 @@ def decode(self, token_ids, **kwargs):
     filtered_tokens = self.convert_ids_to_tokens(token_ids)
     text = self.convert_tokens_to_string(filtered_tokens)
     return text
-GPT2TokenizerFast.decode = decode
+AutoTokenizer.decode = decode
 
 def _convert_token_to_id(self, token):
     return self.encoder.get(token, 0)
-GPT2TokenizerFast._convert_token_to_id = _convert_token_to_id
+AutoTokenizer._convert_token_to_id = _convert_token_to_id
 
 
 # handles both old and new cache formats
@@ -81,26 +81,24 @@ def get_model(seed=1234, model_name='gpt2'):
     torch.cuda.manual_seed(seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    if "hf" in model_name:
-        enc = AutoTokenizer.from_pretrained(
-            "BAAI/Emu3-Chat",
+    enc = AutoTokenizer.from_pretrained(
+            model_name,
             trust_remote_code=True,
             device_map="cuda:0")
+
+    if "hf" in model_name:
         model = Emu3ForConditionalGeneration.from_pretrained(
             model_name, 
             torch_dtype=torch.float16,
             trust_remote_code=True,
             device_map="cuda:0")
     else:
-        enc = AutoProcessor.from_pretrained(
-            model_name,
-            trust_remote_code=True,
-            device_map="cuda:0")
         model = AutoModelForCausalLM.from_pretrained(
             model_name, 
             torch_dtype=torch.float16,
             trust_remote_code=True,
             device_map="cuda:0")
+        
     # model.to(device)
     model.eval()
     # model.double()
@@ -132,6 +130,26 @@ def expansion_ratio(message, encoded):
     encoded_ba.frombytes(encoded.encode('utf-8'))
     encoded_bits = len(encoded_ba.tolist())
     return encoded_bits/message_bits
+
+def is_cit(enc, token, prev):
+    '''
+    Input
+    ----
+    enc: tokenizer
+    token: token id to be verified
+    prev: previously generated token id list
+
+    Returns
+    ----
+    True if is candidate-level inconsistent token (CIT); False otherwise
+    '''
+    prev.append(token)
+    # print(token)
+    temp_text = enc.decode(prev)
+    prev_new = enc.encode(temp_text)
+    # print(prev_new)
+    return prev != prev_new
+
 
 # converts raw image into tokens in LM vocab
 def encode_image(image_path, vision_enc, image_proc):
