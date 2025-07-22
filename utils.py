@@ -1,9 +1,8 @@
-from PIL import Image
 import torch
 import numpy as np
 import bitarray
 
-from transformers import Emu3ForCausalLM, AutoModelForCausalLM, AutoTokenizer, AutoModel, AutoImageProcessor, Emu3ForConditionalGeneration, Emu3Processor, AutoProcessor, GPT2TokenizerFast
+from transformers import AutoModelForCausalLM, AutoTokenizer, Emu3ForConditionalGeneration
 
 def decode(self, token_ids, **kwargs):
     filtered_tokens = self.convert_ids_to_tokens(token_ids)
@@ -64,13 +63,8 @@ def num_same_from_beg(bits1, bits2):
             break
     return i
 
-def encode(processor, text):
-    encoded = processor(text=text, return_tensors="pt")
-    return encoded['input_ids'][0].tolist()
-
 def encode_context(raw_text, enc):
     context_tokens = enc.encode('<|endoftext|>') + enc.encode(raw_text)
-    # context_tokens = encode(enc, '<|endoftext|>') + encode(enc, raw_text)
     return context_tokens
 
 # Use gpt2-medium for 345M param model
@@ -84,25 +78,22 @@ def get_model(seed=1234, model_name='gpt2'):
     enc = AutoTokenizer.from_pretrained(
             model_name,
             trust_remote_code=True,
-            device_map="cuda:0")
-
-    if "hf" in model_name:
+            device_map=device)
+    
+    if "hf" in model_name: # Emu3-Chat-hf or Emu3-Gen-hf
         model = Emu3ForConditionalGeneration.from_pretrained(
             model_name, 
             torch_dtype=torch.float16,
             trust_remote_code=True,
-            device_map="cuda:0")
+            device_map=device)
     else:
         model = AutoModelForCausalLM.from_pretrained(
             model_name, 
             torch_dtype=torch.float16,
             trust_remote_code=True,
-            device_map="cuda:0")
+            device_map=device)
         
-    # model.to(device)
     model.eval()
-    # model.double()
-
     return enc, model
 
 enc32_itoc = ['\0', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z', '.', ',', "'", '!', ' ']
@@ -133,56 +124,18 @@ def expansion_ratio(message, encoded):
 
 def is_cit(enc, token, prev):
     '''
-    Input
-    ----
-    enc: tokenizer
-    token: token id to be verified
-    prev: previously generated token id list
+    Args:
+        enc:
+            Tokenizer
+        token:
+            Token id to be verified
+        prev:
+            Previously generated list of token ids
 
-    Returns
-    ----
-    True if is candidate-level inconsistent token (CIT); False otherwise
+    Returns:
+        True: If is candidate-level inconsistent token (CIT)
     '''
     prev.append(token)
-    # print(token)
     temp_text = enc.decode(prev)
     prev_new = enc.encode(temp_text)
-    # print(prev_new)
     return prev != prev_new
-
-
-# converts raw image into tokens in LM vocab
-def encode_image(image_path, vision_enc, image_proc):
-    image = Image.open(image_path).convert("RGB")
-    image_tensors = image_proc(image, return_tensors="pt")["pixel_values"].to(torch.float16).cuda()
-    print(image_tensors.shape) # [1, 3, 512, 512]
-    with torch.no_grad():
-        visual_tokens = vision_enc.encode(image_tensors)
-        print(visual_tokens.shape) # [1, 64, 64]
-    tokens = visual_tokens + 151854 # offset by ID of visual token 0
-    return tokens
-
-# converts tokens in LM vocab into raw image and saves to image path
-def decode_image(tokens, image_path, vision_enc, image_proc):
-    visual_tokens = tokens - 151854 # undo offset by ID of visual token 0
-    with torch.no_grad():
-        recon = vision_enc.decode(visual_tokens.view(1, 16, 16))
-    recon = recon.view(-1, *recon.shape[2:])
-    recon_image = image_proc.postprocess(recon)["pixel_values"][0]
-    recon_image.save(image_path)
-
-def get_vision_tokenizer(model_name="BAAI/Emu3-VisionTokenizer"):
-    image_proc = AutoImageProcessor.from_pretrained(
-        model_name,
-        trust_remote_code=True,
-        device_map="cuda:0")
-    print("Loaded image processor")
-    
-    vision_enc = AutoModel.from_pretrained(
-        model_name,
-        torch_dtype=torch.float16,
-        trust_remote_code=True,
-        device_map="cuda:0").eval()
-    print("Loaded vision tokenizer")
-    
-    return image_proc, vision_enc
