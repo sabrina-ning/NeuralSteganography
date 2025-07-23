@@ -24,7 +24,9 @@ model = Emu3ForConditionalGeneration.from_pretrained(
 )
 base_model = model.model
 processor = AutoProcessor.from_pretrained(model_id)
-print(type(model), type(processor))
+print("Model:", type(model))
+print("Processor:", type(processor))
+print("Tokenizer:", type(processor.tokenizer))
 
 seed = 12345
 prompt_str = "a puppy"
@@ -161,11 +163,13 @@ def reconstruct(image_tokens):
         prompt = inputs["input_ids"][0]
         context = torch.cat([prompt, image_tokens[:(height - rows_to_predict) * (width + 1)]])
 
-        rec_image_tokens = generate_tokens(model, context, num_tokens)
+        rec_image_tokens = generate_tokens(model, context, num_tokens + 3)
     
     return rec_image_tokens.unsqueeze(0) # [1, 8193]
 
 ## ====================
+
+# Generating
 
 print("="*40 + " image tokens " + "="*40)
 image_tokens = model_generate()
@@ -193,12 +197,7 @@ torch.save(image_tokens_new, "image_tensor_new.pt")
 
 print(image_tokens[0].tolist() == image_tokens_new[0].tolist())
 
-# print("="*40 + " rec image tokens " + "="*40)
-# rec_image_tokens = reconstruct(image_tokens[0].cuda())
-# print(rec_image_tokens.cpu().numpy())
-# print(rec_image_tokens.shape)
-# print("="*40)
-
+# Decode visual tokens
 image_pixels = base_model.decode_image_tokens(image_tokens, height=height, width=width)
 image = processor.image_processor.postprocess(image_pixels, return_tensors="PIL.Image.Image")['pixel_values'][0]
 image.save("result.png")
@@ -207,9 +206,29 @@ image_pixels = base_model.decode_image_tokens(image_tokens_new, height=height, w
 image = processor.image_processor.postprocess(image_pixels, return_tensors="PIL.Image.Image")['pixel_values'][0]
 image.save("result_new.png")
 
-# rec_image_pixels = base_model.decode_image_tokens(rec_image_tokens, height=height, width=width)
-# rec_image = processor.image_processor.postprocess(rec_image_pixels, return_tensors="PIL.Image.Image")['pixel_values'][0]
-# rec_image.save("result_recon_new.png")
+# Reconstructing
+
+image_path = "result_new.png"
+image = Image.open(image_path).convert("RGB") # returns Image object
+
+image = processor.image_processor.preprocess(image, return_tensors="pt") # returns BatchFeature object
+pixel_values = image["pixel_values"].to(torch.float16).cuda()
+image_sizes = image["image_sizes"].cuda()
+
+with torch.no_grad():
+    # Encode pixel values
+    image_tokens = base_model.get_image_tokens(pixel_values, image_sizes).cuda() # [8190]
+
+print("="*40 + " rec image tokens " + "="*40)
+rec_image_tokens = reconstruct(image_tokens)
+# print(rec_image_tokens.cpu().numpy())
+print(rec_image_tokens[0][-20:])
+print(rec_image_tokens.shape)
+print("="*40)
+
+rec_image_pixels = base_model.decode_image_tokens(rec_image_tokens, height=height, width=width)
+rec_image = processor.image_processor.postprocess(rec_image_pixels, return_tensors="PIL.Image.Image")['pixel_values'][0]
+rec_image.save("result_new_recon.png")
 
 end = time.time()
 print(f"Took {end - start:.2f} sec")
