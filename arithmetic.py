@@ -2,39 +2,38 @@ import torch
 import torch.nn.functional as F
 from transformers import DynamicCache
 
-from utils import limit_past, kl, entropy, bits2int, int2bits, is_sent_finish, num_same_from_beg
+from utils import limit_past, kl, entropy, bits2int, int2bits, is_sent_finish, num_same_from_beg, is_cit
 
-def encode_arithmetic(model, enc, message, context, finish_sent=False, device='cuda', temp=1.0, precision=16, topk=50000):
-    context = torch.tensor(context[-1022:], device=device, dtype=torch.long)
+def encode_arithmetic(model, enc, message, context, finish_sent=False, device='cuda', temp=1.0, precision=16, topk=None):
+    context = torch.tensor(context, device=device, dtype=torch.long)
 
     max_val = 2**precision
-    # threshold = 2**(-precision)
     cur_interval = [0, max_val] # bottom inclusive, top exclusive
 
     prev = context
     output = context
     past = None
 
-    # total_num = 0
     total_num_for_stats = 0
     total_log_probs = 0
     total_kl = 0 # in bits
     total_entropy_ptau = 0
-    # total_num_sents = 0
+
+    ranks = []
 
     with torch.no_grad():
         i = 0
         sent_finish = False
         while i < len(message) or (finish_sent and not sent_finish):
-            out = model(prev.unsqueeze(0), past_key_values=DynamicCache.from_legacy_cache(past), use_cache=True)
+            out = model(input_ids=prev.unsqueeze(0), past_key_values=past, use_cache=True)
             logits = out.logits
             past = out.past_key_values
-            past = limit_past(past)
 
-            logits[0, -1, -1] = -1e20 # endoftext token can't happen
-            logits[0, -1, 628] = -1e20 # 2 newlines token can't happen
+            # logits[0, -1, 151643] = -1e4 # endoftext can't happen
+            # logits[0, -1, 151850] = -1e4 # endofsequence can't happen
 
-            logits, indices = logits[0, -1, :].sort(descending=True)
+            logits, indices = logits[0, -1, :151643].sort(descending=True) # text-only
+            
             logits = logits.double()
             logits_temp = logits / temp
             probs_temp = F.softmax(logits_temp, dim=0)
@@ -49,8 +48,46 @@ def encode_arithmetic(model, enc, message, context, finish_sent=False, device='c
                 # Cutoff low probabilities that would be rounded to 0
                 cur_int_range = cur_interval[1]-cur_interval[0]
                 cur_threshold = 1/cur_int_range
-                k = min(max(2, (probs_temp < cur_threshold).nonzero()[0].item()), topk)
-                probs_temp_int = probs_temp[:k] # Cutoff all but top k
+                
+                cutoff_indices = (probs_temp < cur_threshold).nonzero()
+                if len(cutoff_indices) > 0:
+                    k = max(2, cutoff_indices[0].item())
+                else:
+                    k = len(probs_temp)
+                    
+                if topk:
+                    k = min(k, topk)
+                
+                if not topk:
+                    probs_temp_int = probs_temp[:k] # Cutoff all but top k
+                else:
+                    # Perform stepwise verification
+                    indices = indices[:k]
+                    probs = probs_temp[:k]
+
+                    clean_indices = []
+                    clean_probs = []
+
+                    for j in range(len(indices)):
+                        token_id = indices[j].item()
+                        if not is_cit(enc, token_id, list(prev)):
+                            clean_indices.append(token_id)
+                            clean_probs.append(probs[j].item())
+                    
+                    if not clean_probs:
+                        print("Warning: All top-k tokens were inconsistent")
+                        exit
+
+                    indices = torch.tensor(clean_indices, device=device) # FIXME
+                    probs_temp_int = torch.tensor(clean_probs, device=device)
+
+                ## DEBUGGING
+                # if topk:
+                #     print(f"\tTop-k tokens:")
+                #     for rank_idx in range(topk):
+                #         token_id = indices[rank_idx].item()
+                #         token_text = enc.decode([token_id])
+                #         print(f"\t\t{rank_idx}: {[token_text, token_id]}")
 
                 # Rescale to correct range
                 probs_temp_int = probs_temp_int/probs_temp_int.sum()*cur_int_range
@@ -111,9 +148,10 @@ def encode_arithmetic(model, enc, message, context, finish_sent=False, device='c
             # Update history with new token
             prev = indices[selection].view(1)
             output = torch.cat((output, prev))
-            # total_num += 1
-            # print(enc.decode(prev.tolist()), message_bits[:num_bits_encoded])
-            
+
+            ranks.append(selection)
+            # print("encode", enc.decode(prev.tolist()), f"({prev.item()})", message_bits[:num_bits_encoded])
+
             # For text->bits->text
             partial = enc.decode(output[len(context):].tolist())
             if '<eos>' in partial:
@@ -124,27 +162,27 @@ def encode_arithmetic(model, enc, message, context, finish_sent=False, device='c
     avg_Hq = total_entropy_ptau/total_num_for_stats
     words_per_bit = total_num_for_stats/i
 
-    return output[len(context):].tolist(), avg_NLL, avg_KL, words_per_bit, avg_Hq
+    out = output[len(context):].tolist()
+    print("output >>>", out)
+    print(ranks)
+    return out, avg_NLL, avg_KL, words_per_bit, avg_Hq
 
-def decode_arithmetic(model, enc, text, context, device='cuda', temp=1.0, precision=16, topk=50000):
+def decode_arithmetic(model, enc, text, context, device='cuda', temp=1.0, precision=16, topk=None):
     # inp is a list of token indices
     # context is a list of token indices
-    inp = enc.encode(text)
-    # common BPE error case: 128, 128 (2 newlines) is interpretted as 628 (2 newlines)
-    i = 0
-    while i < len(inp):
-        if inp[i] == 628:
-            inp[i] = 198
-            inp[i+1:i+1] = [198]
-            i += 2
-        else:
-            i += 1
 
-    context = torch.tensor(context[-1022:], device=device, dtype=torch.long)
+    if isinstance(text, str):
+        inp = enc.encode(text)
+    else: # if text is list of token indices
+        inp = torch.tensor(text, device=device, dtype=torch.long)
+    print("input >>>", inp)    
+
+    context = torch.tensor(context, device=device, dtype=torch.long)
 
     max_val = 2**precision
-    # threshold = 2**(-precision)
     cur_interval = [0, max_val] # bottom inclusive, top exclusive
+
+    ranks = []
 
     prev = context
     past = None
@@ -152,15 +190,15 @@ def decode_arithmetic(model, enc, text, context, device='cuda', temp=1.0, precis
     with torch.no_grad():
         i = 0
         while i < len(inp):
-            out = model(prev.unsqueeze(0), past_key_values=DynamicCache.from_legacy_cache(past), use_cache=True)
+            out = model(input_ids=prev.unsqueeze(0), past_key_values=past, use_cache=True)
             logits = out.logits
             past = out.past_key_values
-            past = limit_past(past)
 
-            logits[0, -1, -1] = -1e10 # endoftext can't happen
-            logits[0, -1, 628] = -1e10 # 2 newlines can't happen
+            # logits[0, -1, 151643] = -1e4 # endoftext can't happen
+            # logits[0, -1, 151850] = -1e4 # endofsequence can't happen
 
-            logits, indices = logits[0, -1, :].sort(descending=True)
+            logits, indices = logits[0, -1, :151643].sort(descending=True) # text-only
+            
             logits = logits.double()
             logits_temp = logits / temp
             probs_temp = F.softmax(logits_temp, dim=0)
@@ -168,8 +206,46 @@ def decode_arithmetic(model, enc, text, context, device='cuda', temp=1.0, precis
             # Cutoff low probabilities that would be rounded to 0
             cur_int_range = cur_interval[1]-cur_interval[0]
             cur_threshold = 1/cur_int_range
-            k = min(max(2, (probs_temp < cur_threshold).nonzero()[0].item()), topk)
-            probs_temp_int = probs_temp[:k] # Cutoff all but top k
+
+            cutoff_indices = (probs_temp < cur_threshold).nonzero()
+            if len(cutoff_indices) > 0:
+                k = max(2, cutoff_indices[0].item())
+            else:
+                k = len(probs_temp)
+                
+            if topk:
+                k = min(k, topk)
+
+            if not topk:
+                probs_temp_int = probs_temp[:k] # Cutoff all but top k
+            else:
+                # Perform stepwise verification
+                indices = indices[:k]
+                probs = probs_temp[:k]
+
+                clean_indices = []
+                clean_probs = []
+
+                for j in range(len(indices)):
+                    token_id = indices[j].item()
+                    if not is_cit(enc, token_id, list(prev)):
+                        clean_indices.append(token_id)
+                        clean_probs.append(probs[j].item())
+                
+                if not clean_probs:
+                    print("Warning: All top-k tokens were inconsistent")
+                    exit
+
+                indices = torch.tensor(clean_indices, device=device) # FIXME ??
+                probs_temp_int = torch.tensor(clean_probs, device=device)
+        
+            ## DEBUGGING
+            # if topk:
+            #     print(f"\tTop-k tokens:")
+            #     for rank_idx in range(topk):
+            #         token_id = indices[rank_idx].item()
+            #         token_text = enc.decode([token_id])
+            #         print(f"\t\t{rank_idx}: {[token_text, token_id]}")
 
             # Rescale to correct range
             probs_temp_int = probs_temp_int/probs_temp_int.sum()*cur_int_range
@@ -192,49 +268,8 @@ def decode_arithmetic(model, enc, text, context, device='cuda', temp=1.0, precis
 
             rank = (indices == inp[i]).nonzero().item()
 
-            # Handle most errors that could happen because of BPE with heuristic
             if rank >= k:
-                true_token_text = enc.decode([inp[i]])
-                for rank_idx in range(k):
-                    prop_token_text = enc.decode([indices[rank_idx].item()])
-                    # common case that is not caught
-                    if inp[i] == 128 and indices[rank_idx] == 198:
-                        rank = rank_idx
-                        inp[i] = indices[rank_idx].item()
-                        break
-                    
-                    # Is there a more likely prefix token that could be the actual token generated?
-                    if len(prop_token_text) <= len(true_token_text) and \
-                            prop_token_text == true_token_text[:len(prop_token_text)]:
-                        rank = rank_idx
-                        suffix = true_token_text[len(prop_token_text):]
-                        suffix_tokens = enc.encode(suffix) # a list
-                        inp[i] = indices[rank_idx].item()
-                        inp[i+1:i+1] = suffix_tokens # insert suffix tokens into list
-                        break
-
-                    # Is there a more likely longer token that could be the actual token generated?
-                    elif len(prop_token_text) > len(true_token_text) and \
-                              true_token_text == prop_token_text[:len(true_token_text)]:
-                        whole_text = true_token_text
-                        num_extra = 1
-                        while len(whole_text) < len(prop_token_text):
-                            whole_text += enc.decode([inp[i+num_extra]])
-                            num_extra += 1
-                        if prop_token_text == whole_text[:len(prop_token_text)]:
-                            rank = rank_idx
-                            inp[i] = indices[rank_idx].item()
-                            for j in range(1, num_extra):
-                                del inp[i+j]
-
-                            if len(whole_text) > len(prop_token_text):
-                                suffix = whole_text[len(prop_token_text):]
-                                suffix_tokens = enc.encode(suffix) # a list
-                                inp[i+1:i+1] = suffix_tokens # insert suffix tokens into list
-                            break
-                else:
-                    print('Unable to fix BPE error: token received: %s=%d, text: %s' % (true_token_text, inp[i], text))
-                    rank = 0
+                print('Error: tokenization inconsistency')
             
             selection = rank
             
@@ -261,8 +296,13 @@ def decode_arithmetic(model, enc, text, context, device='cuda', temp=1.0, precis
             cur_interval[1] = bits2int(reversed(new_int_top_bits))+1 # +1 here because upper bound is exclusive
             
             # Update history with new token
-            prev = torch.tensor([inp[i]], device=device, dtype=torch.long)
-            # print(enc.decode([inp[i]]), new_bits)
+            # prev = torch.tensor([inp[i]], device=device, dtype=torch.long)
+            prev = torch.tensor([indices[selection].item()], device=device, dtype=torch.long)
+
+            ranks.append(selection)
+            # print("decode", enc.decode([inp[i]]), f"({inp[i]})", new_bits)
+
             i += 1
-    
+
+    print(ranks)
     return message

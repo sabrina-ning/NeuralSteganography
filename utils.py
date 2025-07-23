@@ -2,7 +2,7 @@ import torch
 import numpy as np
 import bitarray
 
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, Emu3ForConditionalGeneration
 
 def decode(self, token_ids, **kwargs):
     filtered_tokens = self.convert_ids_to_tokens(token_ids)
@@ -74,17 +74,26 @@ def get_model(seed=1234, model_name='gpt2'):
     torch.random.manual_seed(seed)
     torch.cuda.manual_seed(seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    enc = AutoTokenizer.from_pretrained(model_name)
-    enc.unk_token = None
-    enc.bos_token = None
-    enc.eos_token = None
     
-    model = AutoModelForCausalLM.from_pretrained(model_name)
-    model.to(device)
+    enc = AutoTokenizer.from_pretrained(
+            model_name,
+            trust_remote_code=True,
+            device_map=device)
+    
+    if "hf" in model_name: # Emu3-Chat-hf or Emu3-Gen-hf
+        model = Emu3ForConditionalGeneration.from_pretrained(
+            model_name, 
+            torch_dtype=torch.float16,
+            trust_remote_code=True,
+            device_map=device)
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name, 
+            torch_dtype=torch.float16,
+            trust_remote_code=True,
+            device_map=device)
+        
     model.eval()
-    # model.double()
-
     return enc, model
 
 enc32_itoc = ['\0', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z', '.', ',', "'", '!', ' ']
@@ -112,3 +121,21 @@ def expansion_ratio(message, encoded):
     encoded_ba.frombytes(encoded.encode('utf-8'))
     encoded_bits = len(encoded_ba.tolist())
     return encoded_bits/message_bits
+
+def is_cit(enc, token, prev):
+    '''
+    Args:
+        enc:
+            Tokenizer
+        token:
+            Token id to be verified
+        prev:
+            Previously generated list of token ids
+
+    Returns:
+        True: If is candidate-level inconsistent token (CIT)
+    '''
+    prev.append(token)
+    temp_text = enc.decode(prev)
+    prev_new = enc.encode(temp_text)
+    return prev != prev_new
