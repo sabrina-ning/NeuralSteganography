@@ -1,8 +1,9 @@
 import torch
 import numpy as np
 import bitarray
+from PIL import Image
 
-from transformers import AutoModelForCausalLM, AutoTokenizer, Emu3ForConditionalGeneration
+from transformers import AutoModelForCausalLM, AutoTokenizer, AutoProcessor, Emu3ForConditionalGeneration, Emu3Processor
 
 def decode(self, token_ids, **kwargs):
     filtered_tokens = self.convert_ids_to_tokens(token_ids)
@@ -53,7 +54,7 @@ def int2bits(inp, num_bits):
     return [int(strval) for strval in reversed(strlist)]
 
 def is_sent_finish(token_idx, enc):
-    token = enc.decode([token_idx])
+    token = enc.tokenizer.decode([token_idx])
     return '.' in token or '!' in token or '?' in token
 
 def num_same_from_beg(bits1, bits2):
@@ -64,8 +65,35 @@ def num_same_from_beg(bits1, bits2):
     return i
 
 def encode_context(raw_text, enc):
-    context_tokens = enc.encode('<|endoftext|>') + enc.encode(raw_text)
+    context_tokens = enc.tokenizer.encode('<|endoftext|>') + enc.tokenizer.encode(raw_text)
     return context_tokens
+
+def encode_image(image_path, model, enc):
+    image = Image.open(image_path).convert("RGB") # returns Image object
+    # width, height = image.size
+
+    image = enc.image_processor.preprocess(image, return_tensors="pt")
+    pixel_values = image["pixel_values"].to(torch.float16).cuda()
+    image_sizes = image["image_sizes"].cuda()
+    height, width = image_sizes[0]
+
+    with torch.no_grad():
+        image_tokens = model.model.get_image_tokens(pixel_values, image_sizes).cuda()
+    
+    start_token = torch.tensor([enc.tokenizer.image_wrapper_token_id], device="cuda")
+    end_tokens = torch.tensor([enc.tokenizer.eof_token_id, enc.tokenizer.eoi_token_id, enc.tokenizer.eos_token_id], device="cuda")
+    image_tokens = torch.cat([start_token, image_tokens, end_tokens])
+
+    return image_tokens, height, width
+
+def decode_image(image_tokens, height, width, model, enc):
+    if not isinstance(image_tokens, torch.Tensor):
+        image_tokens = torch.tensor(image_tokens, device="cuda")
+    image = model.model.decode_image_tokens(image_tokens.unsqueeze(0), 
+                                                height=(height // enc.image_processor.spatial_factor), 
+                                                width=(width // enc.image_processor.spatial_factor))
+    image = enc.image_processor.postprocess(image, return_tensors="PIL.Image.Image")['pixel_values'][0]
+    return image
 
 # Use gpt2-medium for 345M param model
 # Use gpt2-large for 774M param model
@@ -75,10 +103,13 @@ def get_model(seed=1234, model_name='gpt2'):
     torch.cuda.manual_seed(seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    enc = AutoTokenizer.from_pretrained(
+    enc = AutoProcessor.from_pretrained(
             model_name,
             trust_remote_code=True,
             device_map=device)
+    enc.image_processor.min_pixels = 64 * 64
+    # enc.image_processor.max_pixels = 512 * 512
+    # print(enc.image_processor)
     
     if "hf" in model_name: # Emu3-Chat-hf or Emu3-Gen-hf
         model = Emu3ForConditionalGeneration.from_pretrained(
@@ -94,7 +125,7 @@ def get_model(seed=1234, model_name='gpt2'):
             device_map=device)
         
     model.eval()
-    return enc, model
+    return enc, model # enc is processor
 
 enc32_itoc = ['\0', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z', '.', ',', "'", '!', ' ']
 enc32_ctoi = {k: v for v, k in enumerate(enc32_itoc)}
@@ -123,19 +154,9 @@ def expansion_ratio(message, encoded):
     return encoded_bits/message_bits
 
 def is_cit(enc, token, prev):
-    '''
-    Args:
-        enc:
-            Tokenizer
-        token:
-            Token id to be verified
-        prev:
-            Previously generated list of token ids
-
-    Returns:
-        True: If is candidate-level inconsistent token (CIT)
-    '''
+    # prev is list of token ids
+    # returns True iff token is candidate-level inconsistent token (CIT)
     prev.append(token)
-    temp_text = enc.decode(prev)
-    prev_new = enc.encode(temp_text)
+    temp_text = enc.tokenizer.decode(prev)
+    prev_new = enc.tokenizer.encode(temp_text)
     return prev != prev_new

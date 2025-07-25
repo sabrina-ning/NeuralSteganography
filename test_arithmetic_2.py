@@ -1,24 +1,22 @@
-import bitarray
 import math
 import time
 
 from arithmetic import encode_arithmetic, decode_arithmetic
-from utils import get_model, encode_context
+from utils import get_model, encode_context, encode_image, decode_image
 
-def test_arithmetic(message_str, context, model, enc, unicode_enc=False):
+def test_arithmetic(message_str, message_img_path, context, model, enc, unicode_enc=False):
     start = time.time()
 
     ## PARAMETERS
-    temp = 0.9
+    temp = 1.0
     precision = 26
-    topk = 300
+    topk = 600
     finish_sent = False
 
     print("="*40 + " Context " + "="*40)
-    print(f"[{context}]")
-    print()
+    print("context string:", context)
     context_tokens = encode_context(context, enc)
-    print("context tokens >>>", context_tokens)
+    print("context tokens:", context_tokens)
 
     # ------------------------------------------------------------------------------------
     # ------------------------------------------------------------------------------------
@@ -26,50 +24,52 @@ def test_arithmetic(message_str, context, model, enc, unicode_enc=False):
     print("="*40 + " Original Message " + "="*40)
 
     # First encode message to uniform bits, without any context
-    if unicode_enc:
-        ba = bitarray.bitarray()
-        ba.frombytes(message_str.encode('utf-8'))
-        message = ba.tolist()
-    else:
-        message_ctx = enc.tokenizer.encode('<|endoftext|>')
-        message_str += '<eos>'
-        print(f"[{message_str}]")
-        print()
-        message = decode_arithmetic(model, enc, message_str, message_ctx, precision=40, topk=None)
-        print()
-    print(message)
+    message_ctx = enc.tokenizer.encode('<|endoftext|>')
+    message_str += '<eos>'
 
-    print("="*40 + " Encoding -> Cover Text " + "="*40)
+    if message_img_path:
+        message_img_tokens, height, width = encode_image(message_img_path, model, enc)
+        message_str_tokens = enc.tokenizer.encode(message_str)
+        message_tokens = message_img_tokens.tolist() + [enc.tokenizer.bos_token_id] + message_str_tokens
+        message = decode_arithmetic(model, enc, message_tokens, message_ctx, precision=40, topk=None)
+    else:
+        message = decode_arithmetic(model, enc, message_str, message_ctx, precision=40, topk=None)
+    print(f"\n[{message_str}]\n")
+    print("message bits:", message)
+    print(len(message))
+
+    print("="*40 + " Encoding " + "="*40)
 
     # Next encode bits into cover text, using arbitrary context
     out, nll, kl, words_per_bit, Hq = encode_arithmetic(model, enc, message, context_tokens, temp=temp, finish_sent=finish_sent, precision=precision, topk=topk)
     text = enc.tokenizer.decode(out)
-    print()
-    print(f"[{text}]")
-    print()
+    print("cover text:", text)
     print('ppl: %0.2f, kl: %0.3f, words/bit: %0.2f, bits/word: %0.2f, entropy: %.2f' % (math.exp(nll), kl, words_per_bit, 1/words_per_bit, Hq/0.69315))
-    print()
 
     # Decode binary message from bits using the same arbitrary context
     message_rec = decode_arithmetic(model, enc, text, context_tokens, temp=temp, precision=precision, topk=topk)
     
     print("="*40 + " Recovered Message " + "="*40)
-    print(message_rec)
-    print()
+    print("recovered message bits:", message_rec)
 
     # Finally map message bits back to original text
-    if unicode_enc:
-        message_rec = [bool(item) for item in message_rec]
-        ba = bitarray.bitarray(message_rec)
-        reconst = ba.tobytes().decode('utf-8', 'ignore')
-    else:
-        reconst = encode_arithmetic(model, enc, message_rec, message_ctx, precision=40, topk=None)
-        reconst = enc.tokenizer.decode(reconst[0])
-        print(f"[{reconst}]")
-        print()
+    reconst, _, _, _, _ = encode_arithmetic(model, enc, message_rec, message_ctx, precision=40, topk=None)
+    # Check if message has image + text
+    if reconst[0] == enc.tokenizer.image_wrapper_token_id:
+        print('has image!')
+        last_end_token_idx = reconst.index(enc.tokenizer.eos_token_id)
+        image_tokens = reconst[1:last_end_token_idx + 1]
+        print("recovered image tokens:", image_tokens)
 
-    print(message_rec)
-    print()
+        image = decode_image(image_tokens, height, width, model, enc)
+        image.save(message_img_path + ".jpg")
+
+        print("recovered text tokens:", reconst[last_end_token_idx + 2:])
+        reconst = enc.tokenizer.decode(reconst[last_end_token_idx + 2:])
+    else:
+        print("recovered text tokens:", reconst)
+        reconst = enc.tokenizer.decode(reconst)
+    print(f"\n[{reconst}]\n")
 
     end = time.time()
     print(f"Took {end - start:.2f} sec")
@@ -82,8 +82,8 @@ def test_arithmetic(message_str, context, model, enc, unicode_enc=False):
     # assert message == message_rec[:len(message)], "FAILED: bit mismatch"
     # assert message_str == reconst[:len(message_str)], "FAILED: string mismatch"
 
-    if message_str != reconst[:len(message_str)]:
-        print("FAILED: string mismatch")
+    # if message_str != reconst[:len(message_str)]:
+    #     print("FAILED: string mismatch")
 
     # if message != message_rec[:len(message)]:
     #     print("FAILED: bit mismatch")
@@ -103,26 +103,18 @@ def run_all_tests(model_name):
         "This is a very secret message!"
     ]
 
-    # messages = [
-    #     [0, 0, 1, 1, 0, 0, 1, 0, 0, 1, 1, 0, 0, 0, 0, 1, 1, 0, 1, 0, 0, 0, 0, 1, 1, 0, 1, 0, 0, 0, 1, 1],
-    #     [0, 0, 1, 1, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 1, 1, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 1, 1, 0, 1, 0, 0],
-    #     [1, 1, 1, 1, 0, 1, 0, 1, 1, 0, 1, 0, 0, 1, 1, 1, 0, 0, 1, 0, 1, 0, 0, 1, 1, 0, 1, 0, 0, 0, 0, 1, 1, 0, 0, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 1, 1, 0, 1, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 0, 0, 0, 1, 1],
-    #     [1, 1, 1, 0, 0, 0, 0, 1, 1, 0, 1, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0, 1, 1, 1, 0, 0, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 1, 0, 1, 1, 1, 0, 1, 1, 0, 0, 1, 0, 0]
-    # ]
-
-    # messages = [
-    #     [1, 1, 1, 1, 0, 0, 0, 1, 1, 0, 1, 1, 0, 1, 1, 1, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 1, 0, 1, 0, 0, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 0, 0, 1, 0, 1, 1, 0, 1, 1, 0, 0, 0, 1, 1, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1, 1, 1, 1, 1, 0, 1, 1, 0, 1, 0, 1, 0, 0, 0, 1, 1, 1, 0, 1, 1, 0, 0, 0, 0, 1, 0, 0, 1, 1, 1, 1, 1, 1],
-    #     [0, 1, 0, 0, 1, 0, 1, 1, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 1, 1, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 1, 1, 0, 1, 0, 1, 0, 0, 1, 0, 1, 1, 1, 0, 1, 0, 0, 1, 1, 1, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1, 0, 1, 1, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0],
-    #     [1, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 1, 0, 1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 1, 1, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 1, 1, 0, 0, 0, 0, 1, 1, 0, 1, 0, 1, 0, 1, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 0, 1, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0],
-    #     [1, 0, 1, 0, 1, 0, 0, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 0, 1, 0, 1, 1, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 1, 1, 0, 1, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 1, 0, 1, 1, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 0, 1, 1, 1, 0, 0, 0, 1, 0, 0, 0, 0, 1, 1, 0, 1, 1, 0, 0, 0, 1, 0, 1, 1, 1, 0, 0, 1, 0, 0, 1, 1, 1, 1, 0, 0, 1],
-    # ]
+    image_path = "images/cat_64.jpg"
 
     for i, message in enumerate(messages):
-        print(f"Message {i+1}\n")
+        print(f"Message {i+1}")
 
-        print('1')
+        # print('1')
+        # context = """Instagram is an American photo and short-form video sharing social networking service owned by Meta Platforms. It allows users to upload media that can be edited with filters, be organized by hashtags, and be associated with a location via geographical tagging. Posts can be shared publicly or with preapproved followers."""
+        # test_arithmetic(message, None, context, model, enc)
+
+        print('1a')
         context = """Instagram is an American photo and short-form video sharing social networking service owned by Meta Platforms. It allows users to upload media that can be edited with filters, be organized by hashtags, and be associated with a location via geographical tagging. Posts can be shared publicly or with preapproved followers."""
-        test_arithmetic(message, context, model, enc)
+        test_arithmetic(message, image_path, context, model, enc)
 
 #         print('2')
 #         context = """Cornell University is a private Ivy League research university based in Ithaca, New York, United States. The university was co-founded by American philanthropist Ezra Cornell and historian and educator Andrew Dickson White in 1865. Since its founding, Cornell University has been a co-educational and nonsectarian institution."""

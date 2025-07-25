@@ -4,7 +4,7 @@ from transformers import DynamicCache
 
 from utils import limit_past, kl, entropy, bits2int, int2bits, is_sent_finish, num_same_from_beg, is_cit
 
-def encode_arithmetic(model, enc, message, context, finish_sent=False, device='cuda', temp=1.0, precision=16, topk=None):
+def encode_arithmetic(model, enc, message, context, finish_sent=False, device='cuda', temp=1.0, precision=16, topk=None, image_only=False):
     context = torch.tensor(context, device=device, dtype=torch.long)
 
     max_val = 2**precision
@@ -19,7 +19,7 @@ def encode_arithmetic(model, enc, message, context, finish_sent=False, device='c
     total_kl = 0 # in bits
     total_entropy_ptau = 0
 
-    ranks = []
+    num_bits = 0
 
     with torch.no_grad():
         i = 0
@@ -32,7 +32,13 @@ def encode_arithmetic(model, enc, message, context, finish_sent=False, device='c
             # logits[0, -1, 151643] = -1e4 # endoftext can't happen
             # logits[0, -1, 151850] = -1e4 # endofsequence can't happen
 
-            logits, indices = logits[0, -1, :151643].sort(descending=True) # text-only
+            if not topk: # for message -> bits
+                if image_only:
+                    logits, indices = logits[0, -1, 151644:].sort(descending=True) # image-only
+                else:
+                    logits, indices = logits[0, -1, :].sort(descending=True)
+            else: # for cover text
+                logits, indices = logits[0, -1, :151643].sort(descending=True) # text-only
             
             logits = logits.double()
             logits_temp = logits / temp
@@ -86,7 +92,7 @@ def encode_arithmetic(model, enc, message, context, finish_sent=False, device='c
                 #     print(f"\tTop-k tokens:")
                 #     for rank_idx in range(topk):
                 #         token_id = indices[rank_idx].item()
-                #         token_text = enc.decode([token_id])
+                #         token_text = enc.tokenizer.decode([token_id])
                 #         print(f"\t\t{rank_idx}: {[token_text, token_id]}")
 
                 # Rescale to correct range
@@ -149,11 +155,13 @@ def encode_arithmetic(model, enc, message, context, finish_sent=False, device='c
             prev = indices[selection].view(1)
             output = torch.cat((output, prev))
 
-            ranks.append(selection)
-            # print("encode", enc.decode(prev.tolist()), f"({prev.item()})", message_bits[:num_bits_encoded])
+            print("encode", enc.tokenizer.decode(prev.tolist()), f"({prev.item()})", message_bits[:num_bits_encoded])
+            num_bits += num_bits_encoded
+            print(num_bits)
+            print()
 
             # For text->bits->text
-            partial = enc.decode(output[len(context):].tolist())
+            partial = enc.tokenizer.decode(output[len(context):].tolist())
             if '<eos>' in partial:
                 break
             
@@ -164,27 +172,29 @@ def encode_arithmetic(model, enc, message, context, finish_sent=False, device='c
 
     out = output[len(context):].tolist()
     print("output >>>", out)
-    print(ranks)
+
     return out, avg_NLL, avg_KL, words_per_bit, avg_Hq
 
-def decode_arithmetic(model, enc, text, context, device='cuda', temp=1.0, precision=16, topk=None):
+def decode_arithmetic(model, enc, text, context, device='cuda', temp=1.0, precision=16, topk=None, image_only=False):
     # inp is a list of token indices
     # context is a list of token indices
 
     if isinstance(text, str):
-        inp = enc.encode(text)
-    else: # if text is list of token indices
+        inp = enc.tokenizer.encode(text)
+    elif isinstance(text, list): # list -> tensor
         inp = torch.tensor(text, device=device, dtype=torch.long)
-    print("input >>>", inp)    
+    else:
+        inp = text
+    print("input  >>>", inp)
 
-    context = torch.tensor(context, device=device, dtype=torch.long)
+    # context = torch.tensor(context, device=device, dtype=torch.long)
 
     max_val = 2**precision
     cur_interval = [0, max_val] # bottom inclusive, top exclusive
 
-    ranks = []
+    num_bits = 0
 
-    prev = context
+    prev = torch.tensor(context, device=device, dtype=torch.long)
     past = None
     message = []
     with torch.no_grad():
@@ -197,7 +207,13 @@ def decode_arithmetic(model, enc, text, context, device='cuda', temp=1.0, precis
             # logits[0, -1, 151643] = -1e4 # endoftext can't happen
             # logits[0, -1, 151850] = -1e4 # endofsequence can't happen
 
-            logits, indices = logits[0, -1, :151643].sort(descending=True) # text-only
+            if not topk: # for message -> bits
+                if image_only:
+                    logits, indices = logits[0, -1, 151644:].sort(descending=True) # image-only
+                else:
+                    logits, indices = logits[0, -1, :].sort(descending=True)
+            else: # for cover text
+                logits, indices = logits[0, -1, :151643].sort(descending=True) # text-only
             
             logits = logits.double()
             logits_temp = logits / temp
@@ -241,11 +257,11 @@ def decode_arithmetic(model, enc, text, context, device='cuda', temp=1.0, precis
         
             ## DEBUGGING
             # if topk:
-            #     print(f"\tTop-k tokens:")
-            #     for rank_idx in range(topk):
-            #         token_id = indices[rank_idx].item()
-            #         token_text = enc.decode([token_id])
-            #         print(f"\t\t{rank_idx}: {[token_text, token_id]}")
+            # print(f"\tTop-k tokens:")
+            # for rank_idx in range(10):
+            #     token_id = indices[rank_idx].item()
+            #     token_text = enc.tokenizer.decode([token_id])
+            #     print(f"\t\t{rank_idx}: {[token_text, token_id]}")
 
             # Rescale to correct range
             probs_temp_int = probs_temp_int/probs_temp_int.sum()*cur_int_range
@@ -299,10 +315,11 @@ def decode_arithmetic(model, enc, text, context, device='cuda', temp=1.0, precis
             # prev = torch.tensor([inp[i]], device=device, dtype=torch.long)
             prev = torch.tensor([indices[selection].item()], device=device, dtype=torch.long)
 
-            ranks.append(selection)
-            # print("decode", enc.decode([inp[i]]), f"({inp[i]})", new_bits)
-
+            print("decode", enc.tokenizer.decode([inp[i]]), f"({inp[i]})", new_bits)
+            num_bits += num_bits_encoded
+            print(num_bits)
+            print()
+            
             i += 1
 
-    print(ranks)
     return message
