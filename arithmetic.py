@@ -1,10 +1,11 @@
 import torch
 import torch.nn.functional as F
 from transformers import DynamicCache
+import time
 
 from utils import limit_past, kl, entropy, bits2int, int2bits, is_sent_finish, num_same_from_beg, is_cit
 
-def encode_arithmetic(model, enc, message, context, finish_sent=False, device='cuda', temp=1.0, precision=16, topk=None, image_only=False):
+def encode_arithmetic(model, enc, message, context, finish_sent=False, device='cuda', temp=1.0, precision=16, topk=None):
     context = torch.tensor(context, device=device, dtype=torch.long)
 
     max_val = 2**precision
@@ -25,6 +26,10 @@ def encode_arithmetic(model, enc, message, context, finish_sent=False, device='c
         i = 0
         sent_finish = False
         while i < len(message) or (finish_sent and not sent_finish):
+            print()
+            # print("cache size:", past.get_seq_length() if past else 0)
+            # if past:
+            #     past = limit_past(past)
             out = model(input_ids=prev.unsqueeze(0), past_key_values=past, use_cache=True)
             logits = out.logits
             past = out.past_key_values
@@ -33,10 +38,7 @@ def encode_arithmetic(model, enc, message, context, finish_sent=False, device='c
             # logits[0, -1, 151850] = -1e4 # endofsequence can't happen
 
             if not topk: # for message -> bits
-                if image_only:
-                    logits, indices = logits[0, -1, 151644:].sort(descending=True) # image-only
-                else:
-                    logits, indices = logits[0, -1, :].sort(descending=True)
+                logits, indices = logits[0, -1, :].sort(descending=True)
             else: # for cover text
                 logits, indices = logits[0, -1, :151643].sort(descending=True) # text-only
             
@@ -84,7 +86,7 @@ def encode_arithmetic(model, enc, message, context, finish_sent=False, device='c
                         print("Warning: All top-k tokens were inconsistent")
                         exit
 
-                    indices = torch.tensor(clean_indices, device=device) # FIXME
+                    indices = torch.tensor(clean_indices, device=device)
                     probs_temp_int = torch.tensor(clean_probs, device=device)
 
                 ## DEBUGGING
@@ -95,18 +97,32 @@ def encode_arithmetic(model, enc, message, context, finish_sent=False, device='c
                 #         token_text = enc.tokenizer.decode([token_id])
                 #         print(f"\t\t{rank_idx}: {[token_text, token_id]}")
 
+                # FIXME >>>
+
                 # Rescale to correct range
+                print("interval size:", cur_int_range)
                 probs_temp_int = probs_temp_int/probs_temp_int.sum()*cur_int_range
+                print("probs:", probs_temp_int[:10], probs_temp_int.shape)
 
                 # Round probabilities to integers given precision
                 probs_temp_int = probs_temp_int.round().long()
+                print("rounded probs:", probs_temp_int[:10], probs_temp_int.shape)
+                print("k:", k)
+                print("clean probs:", len(clean_probs))
                 cum_probs = probs_temp_int.cumsum(0)
+                print("cum probs:", cum_probs[:10], cum_probs.shape)
 
                 # Remove any elements from the bottom if rounding caused the total prob to be too large
                 overfill_index = (cum_probs > cur_int_range).nonzero()
                 if len(overfill_index) > 0:
+                    print("first overfill index:", overfill_index[0])
+                    if overfill_index[0] == 0:
+                        print("overfill!")
+                        # cum_probs = torch.tensor([cur_int_range], device=device)
                     cum_probs = cum_probs[:overfill_index[0]]
-
+                    
+                # <<< FIXME numerical issue? cast to float32 temporarily
+                
                 # Add any mass to the top if removing/rounding causes the total prob to be too small
                 cum_probs += cur_int_range-cum_probs[-1] # add
 
@@ -123,6 +139,8 @@ def encode_arithmetic(model, enc, message, context, finish_sent=False, device='c
                     message_bits = message_bits + [0]*(i+precision-len(message))
                 message_idx = bits2int(reversed(message_bits))
                 selection = (cum_probs > message_idx).nonzero()[0].item()
+                print("message index:", message_idx)
+                print("selection:", selection)
 
                 # Calculate new range as ints
                 new_int_bottom = cum_probs[selection-1] if selection > 0 else cur_interval[0]
@@ -131,6 +149,8 @@ def encode_arithmetic(model, enc, message, context, finish_sent=False, device='c
                 # Convert range to bits
                 new_int_bottom_bits_inc = list(reversed(int2bits(new_int_bottom, precision)))
                 new_int_top_bits_inc = list(reversed(int2bits(new_int_top-1, precision))) # -1 here because upper bound is exclusive
+                print("lower bound:", new_int_bottom, "->", new_int_bottom_bits_inc)
+                print("upper bound:", new_int_top, "->", new_int_top_bits_inc)
 
                 # Consume most significant bits which are now fixed and update interval
                 num_bits_encoded = num_same_from_beg(new_int_bottom_bits_inc, new_int_top_bits_inc)
@@ -141,6 +161,15 @@ def encode_arithmetic(model, enc, message, context, finish_sent=False, device='c
 
                 cur_interval[0] = bits2int(reversed(new_int_bottom_bits))
                 cur_interval[1] = bits2int(reversed(new_int_top_bits))+1 # +1 here because upper bound is exclusive
+
+                cur_entropy = entropy(probs_temp, log_probs_temp)
+                print('entropy:', cur_entropy)
+
+                # Heuristic for low entropy
+                # if topk and cur_entropy < 0.01:
+                #     temp += 0.1
+                #     print('low entropy! new temp:', temp)
+                #     breakpoint()
 
                 # Gather statistics
                 total_log_probs += log_probs[selection].item()
@@ -155,15 +184,18 @@ def encode_arithmetic(model, enc, message, context, finish_sent=False, device='c
             prev = indices[selection].view(1)
             output = torch.cat((output, prev))
 
-            print("encode", enc.tokenizer.decode(prev.tolist()), f"({prev.item()})", message_bits[:num_bits_encoded])
+            # print("encode", enc.tokenizer.decode(prev.tolist()), f"({prev.item()})", message_bits[:num_bits_encoded])
             num_bits += num_bits_encoded
             print(num_bits)
             print()
 
             # For text->bits->text
             partial = enc.tokenizer.decode(output[len(context):].tolist())
+            print("partial:", partial)
             if '<eos>' in partial:
                 break
+
+            # time.sleep(2)
             
     avg_NLL = -total_log_probs/total_num_for_stats
     avg_KL = total_kl/total_num_for_stats
@@ -175,7 +207,7 @@ def encode_arithmetic(model, enc, message, context, finish_sent=False, device='c
 
     return out, avg_NLL, avg_KL, words_per_bit, avg_Hq
 
-def decode_arithmetic(model, enc, text, context, device='cuda', temp=1.0, precision=16, topk=None, image_only=False):
+def decode_arithmetic(model, enc, text, context, device='cuda', temp=1.0, precision=16, topk=None):
     # inp is a list of token indices
     # context is a list of token indices
 
@@ -208,16 +240,14 @@ def decode_arithmetic(model, enc, text, context, device='cuda', temp=1.0, precis
             # logits[0, -1, 151850] = -1e4 # endofsequence can't happen
 
             if not topk: # for message -> bits
-                if image_only:
-                    logits, indices = logits[0, -1, 151644:].sort(descending=True) # image-only
-                else:
-                    logits, indices = logits[0, -1, :].sort(descending=True)
+                logits, indices = logits[0, -1, :].sort(descending=True)
             else: # for cover text
                 logits, indices = logits[0, -1, :151643].sort(descending=True) # text-only
             
             logits = logits.double()
             logits_temp = logits / temp
             probs_temp = F.softmax(logits_temp, dim=0)
+            log_probs_temp = F.log_softmax(logits_temp, dim=0) # for entropy calculation
             
             # Cutoff low probabilities that would be rounded to 0
             cur_int_range = cur_interval[1]-cur_interval[0]
@@ -273,6 +303,10 @@ def decode_arithmetic(model, enc, text, context, device='cuda', temp=1.0, precis
             # Remove any elements from the bottom if rounding caused the total prob to be too large
             overfill_index = (cum_probs > cur_int_range).nonzero()
             if len(overfill_index) > 0:
+                # if topk and overfill_index[0] == 0:
+                #     print("overfill -> entropy:", entropy(probs_temp, log_probs_temp))
+                #     temp = 1.3
+                #     continue
                 cum_probs = cum_probs[:overfill_index[0]]
                 k = overfill_index[0].item()
 
@@ -285,7 +319,7 @@ def decode_arithmetic(model, enc, text, context, device='cuda', temp=1.0, precis
             rank = (indices == inp[i]).nonzero().item()
 
             if rank >= k:
-                print('Error: tokenization inconsistency')
+                print('Error: tokenization inconsistency, rank >= k')
             
             selection = rank
             
@@ -310,15 +344,26 @@ def decode_arithmetic(model, enc, text, context, device='cuda', temp=1.0, precis
 
             cur_interval[0] = bits2int(reversed(new_int_bottom_bits))
             cur_interval[1] = bits2int(reversed(new_int_top_bits))+1 # +1 here because upper bound is exclusive
+
+            cur_entropy = entropy(probs_temp, log_probs_temp)
+            # print(cur_entropy)
+
+            # Heuristic for low entropy
+            # if topk and cur_entropy < 0.01:
+            #     print('low entropy!', cur_entropy)
+            #     temp = min(temp + 0.1, 1.3)
+            # elif topk:
+            #     temp = 0.9
+            # print()
             
             # Update history with new token
             # prev = torch.tensor([inp[i]], device=device, dtype=torch.long)
             prev = torch.tensor([indices[selection].item()], device=device, dtype=torch.long)
 
-            print("decode", enc.tokenizer.decode([inp[i]]), f"({inp[i]})", new_bits)
+            # print("decode", enc.tokenizer.decode([inp[i]]), f"({inp[i]})", new_bits)
             num_bits += num_bits_encoded
             print(num_bits)
-            print()
+            # print()
             
             i += 1
 

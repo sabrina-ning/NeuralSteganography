@@ -1,16 +1,18 @@
 import math
 import time
+import ipdb
 
 from arithmetic import encode_arithmetic, decode_arithmetic
 from utils import get_model, encode_context, encode_image, decode_image
 
 def test_arithmetic(message_str, message_img_path, context, model, enc, unicode_enc=False):
     start = time.time()
+    # ipdb.set_trace()
 
     ## PARAMETERS
-    temp = 1.0
+    temp = 0.9
     precision = 26
-    topk = 600
+    topk = 300
     finish_sent = False
 
     print("="*40 + " Context " + "="*40)
@@ -27,16 +29,19 @@ def test_arithmetic(message_str, message_img_path, context, model, enc, unicode_
     message_ctx = enc.tokenizer.encode('<|endoftext|>')
     message_str += '<eos>'
 
-    if message_img_path:
-        message_img_tokens, height, width = encode_image(message_img_path, model, enc)
+    if message_img_path: # text + image
+        message_img_tokens, height, width, _ = encode_image(message_img_path, model, enc)
         message_str_tokens = enc.tokenizer.encode(message_str)
         message_tokens = message_img_tokens.tolist() + [enc.tokenizer.bos_token_id] + message_str_tokens
-        message = decode_arithmetic(model, enc, message_tokens, message_ctx, precision=40, topk=None)
-    else:
+        # message_tokens = message_img_tokens.tolist() + [151849] + message_str_tokens
+        print("message tokens:", message_tokens)
+        message = decode_arithmetic(model, enc, message_tokens, message_ctx, precision=50, topk=None)
+    else: # text-only
+        print('text-only!')
         message = decode_arithmetic(model, enc, message_str, message_ctx, precision=40, topk=None)
     print(f"\n[{message_str}]\n")
-    print("message bits:", message)
-    print(len(message))
+    # print("message bits:", message)
+    print("num message bits:", len(message))
 
     print("="*40 + " Encoding " + "="*40)
 
@@ -46,6 +51,13 @@ def test_arithmetic(message_str, message_img_path, context, model, enc, unicode_
     print("cover text:", text)
     print('ppl: %0.2f, kl: %0.3f, words/bit: %0.2f, bits/word: %0.2f, entropy: %.2f' % (math.exp(nll), kl, words_per_bit, 1/words_per_bit, Hq/0.69315))
 
+    end = time.time()
+    print(f"Encoding: Took {end - start:.2f} sec\n")
+
+    breakpoint()
+
+    start = time.time()
+
     # Decode binary message from bits using the same arbitrary context
     message_rec = decode_arithmetic(model, enc, text, context_tokens, temp=temp, precision=precision, topk=topk)
     
@@ -53,26 +65,29 @@ def test_arithmetic(message_str, message_img_path, context, model, enc, unicode_
     print("recovered message bits:", message_rec)
 
     # Finally map message bits back to original text
-    reconst, _, _, _, _ = encode_arithmetic(model, enc, message_rec, message_ctx, precision=40, topk=None)
-    # Check if message has image + text
+    reconst, _, _, _, _ = encode_arithmetic(model, enc, message_rec, message_ctx, precision=50, topk=None)
+
+    # Check if message has image
     if reconst[0] == enc.tokenizer.image_wrapper_token_id:
+    # if reconst[0] == 151851:
         print('has image!')
         last_end_token_idx = reconst.index(enc.tokenizer.eos_token_id)
+        # last_end_token_idx = reconst.index(151850)
         image_tokens = reconst[1:last_end_token_idx + 1]
         print("recovered image tokens:", image_tokens)
 
         image = decode_image(image_tokens, height, width, model, enc)
         image.save(message_img_path + ".jpg")
 
-        print("recovered text tokens:", reconst[last_end_token_idx + 2:])
+        print("recovered text tokens:", reconst[last_end_token_idx + 2:]) # skip BOS
         reconst = enc.tokenizer.decode(reconst[last_end_token_idx + 2:])
-    else:
+    else: # text-only
         print("recovered text tokens:", reconst)
         reconst = enc.tokenizer.decode(reconst)
     print(f"\n[{reconst}]\n")
 
     end = time.time()
-    print(f"Took {end - start:.2f} sec")
+    print(f"Decoding: Took {end - start:.2f} sec")
 
     # Testing >>>
     # for i, (a, b) in enumerate(zip(message, message_rec)):
@@ -99,72 +114,49 @@ def run_all_tests(model_name):
     print(f"Tokenizer: {type(enc.tokenizer)}")
 
     messages = [
-        # "",
-        "This is a very secret message!"
+        "This is a very secret message!",
+        "The quick brown fox jumps over the lazy dog.",
+        # "The password to this account is: abcDEF01234"
     ]
 
-    image_path = "images/cat_64.jpg"
+    images = [
+        "images/cat_64.jpg",
+        "images/cornell_64.jpg",
+        "images/yosemite_64.jpg"
+    ]
 
     for i, message in enumerate(messages):
         print(f"Message {i+1}")
 
-        # print('1')
-        # context = """Instagram is an American photo and short-form video sharing social networking service owned by Meta Platforms. It allows users to upload media that can be edited with filters, be organized by hashtags, and be associated with a location via geographical tagging. Posts can be shared publicly or with preapproved followers."""
-        # test_arithmetic(message, None, context, model, enc)
+        for j, image in enumerate(images):
+            print(f"Image {j+1}")
 
-        print('1a')
-        context = """Instagram is an American photo and short-form video sharing social networking service owned by Meta Platforms. It allows users to upload media that can be edited with filters, be organized by hashtags, and be associated with a location via geographical tagging. Posts can be shared publicly or with preapproved followers."""
-        test_arithmetic(message, image_path, context, model, enc)
+            # print('1')
+            # context = """Instagram is an American photo and short-form video sharing social networking service owned by Meta Platforms. It allows users to upload media that can be edited with filters, be organized by hashtags, and be associated with a location via geographical tagging. Posts can be shared publicly or with preapproved followers."""
+            # test_arithmetic(message, image, context, model, enc)
 
-#         print('2')
-#         context = """Cornell University is a private Ivy League research university based in Ithaca, New York, United States. The university was co-founded by American philanthropist Ezra Cornell and historian and educator Andrew Dickson White in 1865. Since its founding, Cornell University has been a co-educational and nonsectarian institution."""
-#         test_arithmetic(message, context, model, enc)
+            # print('2')
+            # context = """Cornell University is a private Ivy League research university based in Ithaca, New York, United States. The university was co-founded by American philanthropist Ezra Cornell and historian and educator Andrew Dickson White in 1865. Since its founding, Cornell University has been a co-educational and nonsectarian institution."""
+            # test_arithmetic(message, image, context, model, enc)
 
-#         print('3')
-#         context = """Abraham Lincoln (February 12, 1809 – April 15, 1865) was the 16th president of the United States, serving from 1861 until his assassination in 1865. He led the United States through the American Civil War, defeating the Confederate States of America and playing a major role in the abolition of slavery.
+#             print('3')
+#             context = """Abraham Lincoln (February 12, 1809 – April 15, 1865) was the 16th president of the United States, serving from 1861 until his assassination in 1865. He led the United States through the American Civil War, defeating the Confederate States of America and playing a major role in the abolition of slavery.
 # Lincoln was born into poverty in Kentucky and raised on the frontier."""
-#         test_arithmetic(message, context, model, enc)
+#             test_arithmetic(message, image, context, model, enc)
 
-#         print('4')
-#         context = """San Francisco, officially the City and County of San Francisco, is a commercial, financial, and cultural center of Northern California. With a population of 827,526 residents as of 2024, San Francisco is the fourth-most populous city in the U.S. state of California and the 17th-most populous in the United States. San Francisco has a land area of 46.9 square miles (121 square kilometers) at the upper end of the San Francisco Peninsula and is the fifth-most densely populated U.S. county."""
-#         test_arithmetic(message, context, model, enc)
+            # print('4')
+            # context = """San Francisco, officially the City and County of San Francisco, is a commercial, financial, and cultural center of Northern California. With a population of 827,526 residents as of 2024, San Francisco is the fourth-most populous city in the U.S. state of California and the 17th-most populous in the United States. San Francisco has a land area of 46.9 square miles (121 square kilometers) at the upper end of the San Francisco Peninsula and is the fifth-most densely populated U.S. county."""
+            # test_arithmetic(message, image, context, model, enc)
 
-#         print('5')
-#         context = """Python is a high-level, general-purpose programming language. Its design philosophy emphasizes code readability with the use of significant indentation.
-# Python is dynamically type-checked and garbage-collected. It supports multiple programming paradigms, including structured (particularly procedural), object-oriented and functional programming.
+            print('5')
+            context = """Python is a high-level, general-purpose programming language. Its design philosophy emphasizes code readability with the use of significant indentation.
 
-# """
-#         test_arithmetic(message, context, model, enc)
+Python is dynamically type-checked and garbage-collected. It supports multiple programming paradigms, including structured (particularly procedural), object-oriented and functional programming."""
+            test_arithmetic(message, image, context, model, enc)
 
-#         print('6')
-#         context = """Users can browse other users' content by tags and locations, view trending content, like photos, and follow other users to add their content to a personal feed.[10] A Meta-operated image-centric social media platform, it is available on iOS, Android, Windows 10, and the web. Users can take photos and edit them using built-in filters and other tools, then share them on other social media platforms like Facebook."""
-#         test_arithmetic(message, context, model, enc)
-
-#         print('7')
-#         context = """As of fall 2024, the student body included 16,128 undergraduate and 10,665 graduate students from all 50 U.S. states and 130 countries.[7]
-
-# The university is organized into eight undergraduate colleges and seven graduate divisions on its main Ithaca campus.[12] Each college and academic division has near autonomy in defining its respective admission standards and academic curriculum."""
-#         test_arithmetic(message, context, model, enc)
-
-#         print('8')
-#         context = """He was self-educated and became a lawyer, Illinois state legislator, and U.S. representative. Angered by the Kansas–Nebraska Act of 1854, which opened the territories to slavery, he became a leader of the new Republican Party. He reached a national audience in the 1858 Senate campaign debates against Stephen A. Douglas."""
-#         test_arithmetic(message, context, model, enc)
-
-#         print('9')
-#         context = """Among U.S. cities proper with over 250,000 residents, San Francisco is ranked first by per capita income and sixth by aggregate income as of 2023.[25] San Francisco anchors the 13th-most populous metropolitan statistical area in the U.S., with almost 4.6 million residents in 2023. The larger San Jose–San Francisco–Oakland combined statistical area, the fifth-largest urban region in the U.S., had a 2023 estimated population of over nine million."""
-#         test_arithmetic(message, context, model, enc)
-
-#         print('10')
-#         context = """Guido van Rossum began working on Python in the late 1980s as a successor to the ABC programming language, and he first released it in 1991 as Python 0.9.0.[34] Python 2.0 was released in 2000. Python 3.0, released in 2008, was a major revision not completely backward-compatible with earlier versions. Python 2.7.18, released in 2020, was the last release of Python 2.[35]"""
-#         test_arithmetic(message, context, model, enc)
-
-    print("Done.")
+    print("Done.")    
 
 
 if __name__ == "__main__":
-    # run_all_tests("gpt2")
-    # run_all_tests("BAAI/Emu3-Stage1")
-    # run_all_tests("BAAI/Emu3-Gen")
-
     run_all_tests("BAAI/Emu3-Chat-hf")
-    # run_all_tests("BAAI/Emu3-Chat")
+    # run_all_tests("BAAI/Emu3-Gen-hf")
