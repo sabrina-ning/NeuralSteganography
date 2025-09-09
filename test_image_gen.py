@@ -29,7 +29,8 @@ print("Processor:", type(processor))
 print("Tokenizer:", type(processor.tokenizer))
 
 seed = 12345
-prompt_str = "a puppy"
+# prompt_str = "a puppy"
+prompt_str = "San Francisco, officially the City and County of San Francisco, is a commercial, financial, and cultural center of Northern California. With a population of 827,526 residents as of 2024, San Francisco is the fourth-most populous city in the U.S. state of California and the 17th-most populous in the United States. San Francisco has a land area of 46.9 square miles (121 square kilometers) at the upper end of the San Francisco Peninsula and is the fifth-most densely populated U.S. county."
 inputs = processor(
     text=[prompt_str],
     padding=True,
@@ -40,6 +41,18 @@ inputs = processor(
 num_prompt_tokens = inputs["input_ids"].shape[1]
 height, width = inputs["image_sizes"][0] # (90, 90)
 total_image_tokens = height * (width + 1)
+
+'''
+Example:
+
+{'input_ids': tensor([[151849, 64, 41189, 151852, 24, 15, 9, 24, 15, 151851]], device='cuda:0'), 
+    'attention_mask': tensor([[1, 1, 1, 1, 1, 1, 1, 1, 1, 1]], device='cuda:0'), 
+    'image_sizes': tensor([[90, 90]], device='cuda:0')}
+         
+<|extra_203|>aĠpuppy<|image start|>90*90<|image token|>
+
+image_wrapper_token_id = 151851 = <|image token|>
+'''
 
 visual_tokens = base_model.vocabulary_mapping.image_tokens # [151854, 184621]
 

@@ -2,6 +2,8 @@ import torch
 import torch.nn.functional as F
 from transformers import DynamicCache
 import time
+# import numpy as np
+# import matplotlib.pyplot as plt
 
 from utils import limit_past, kl, entropy, bits2int, int2bits, is_sent_finish, num_same_from_beg, is_cit
 
@@ -21,18 +23,23 @@ def encode_arithmetic(model, enc, message, context, finish_sent=False, device='c
     total_entropy_ptau = 0
 
     num_bits = 0
+    
+    # probs_over_time = []
+    # entropy_over_time = []
+    # token_labels = []
 
     with torch.no_grad():
         i = 0
         sent_finish = False
         while i < len(message) or (finish_sent and not sent_finish):
+        # while i < 800:
             print()
-            # print("cache size:", past.get_seq_length() if past else 0)
-            # if past:
-            #     past = limit_past(past)
+
             out = model(input_ids=prev.unsqueeze(0), past_key_values=past, use_cache=True)
             logits = out.logits
             past = out.past_key_values
+
+            # breakpoint()
 
             # logits[0, -1, 151643] = -1e4 # endoftext can't happen
             # logits[0, -1, 151850] = -1e4 # endofsequence can't happen
@@ -101,16 +108,23 @@ def encode_arithmetic(model, enc, message, context, finish_sent=False, device='c
 
                 # Rescale to correct range
                 print("interval size:", cur_int_range)
-                probs_temp_int = probs_temp_int/probs_temp_int.sum()*cur_int_range
                 print("probs:", probs_temp_int[:10], probs_temp_int.shape)
+
+                # top_probs = probs_temp_int[:10].tolist()
+                # top_probs += [0] * (10 - len(top_probs))
+                # probs_over_time.append(top_probs)
+                # if not token_labels:
+                #     token_labels = [i + 1 for i in range(10)]
+
+                probs_temp_int = probs_temp_int/probs_temp_int.sum()*cur_int_range
 
                 # Round probabilities to integers given precision
                 probs_temp_int = probs_temp_int.round().long()
-                print("rounded probs:", probs_temp_int[:10], probs_temp_int.shape)
-                print("k:", k)
-                print("clean probs:", len(clean_probs))
+                # print("rounded probs:", probs_temp_int[:10], probs_temp_int.shape)
+                # print("k:", k)
+                # print("clean probs:", len(clean_probs))
                 cum_probs = probs_temp_int.cumsum(0)
-                print("cum probs:", cum_probs[:10], cum_probs.shape)
+                # print("cum probs:", cum_probs[:10], cum_probs.shape)
 
                 # Remove any elements from the bottom if rounding caused the total prob to be too large
                 overfill_index = (cum_probs > cur_int_range).nonzero()
@@ -124,7 +138,8 @@ def encode_arithmetic(model, enc, message, context, finish_sent=False, device='c
                 # <<< FIXME numerical issue? cast to float32 temporarily
                 
                 # Add any mass to the top if removing/rounding causes the total prob to be too small
-                cum_probs += cur_int_range-cum_probs[-1] # add
+                # print(type(cum_probs))
+                cum_probs[-1] += cur_int_range-cum_probs[-1] # add
 
                 # Get out resulting probabilities
                 probs_final = cum_probs.clone()
@@ -139,8 +154,8 @@ def encode_arithmetic(model, enc, message, context, finish_sent=False, device='c
                     message_bits = message_bits + [0]*(i+precision-len(message))
                 message_idx = bits2int(reversed(message_bits))
                 selection = (cum_probs > message_idx).nonzero()[0].item()
-                print("message index:", message_idx)
-                print("selection:", selection)
+                # print("message index:", message_idx)
+                # print("selection:", selection)
 
                 # Calculate new range as ints
                 new_int_bottom = cum_probs[selection-1] if selection > 0 else cur_interval[0]
@@ -149,8 +164,8 @@ def encode_arithmetic(model, enc, message, context, finish_sent=False, device='c
                 # Convert range to bits
                 new_int_bottom_bits_inc = list(reversed(int2bits(new_int_bottom, precision)))
                 new_int_top_bits_inc = list(reversed(int2bits(new_int_top-1, precision))) # -1 here because upper bound is exclusive
-                print("lower bound:", new_int_bottom, "->", new_int_bottom_bits_inc)
-                print("upper bound:", new_int_top, "->", new_int_top_bits_inc)
+                # print("lower bound:", new_int_bottom, "->", new_int_bottom_bits_inc)
+                # print("upper bound:", new_int_top, "->", new_int_top_bits_inc)
 
                 # Consume most significant bits which are now fixed and update interval
                 num_bits_encoded = num_same_from_beg(new_int_bottom_bits_inc, new_int_top_bits_inc)
@@ -163,13 +178,15 @@ def encode_arithmetic(model, enc, message, context, finish_sent=False, device='c
                 cur_interval[1] = bits2int(reversed(new_int_top_bits))+1 # +1 here because upper bound is exclusive
 
                 cur_entropy = entropy(probs_temp, log_probs_temp)
-                print('entropy:', cur_entropy)
+                # print('entropy:', cur_entropy)
+
+                # entropy_over_time.append(cur_entropy)
 
                 # Heuristic for low entropy
                 # if topk and cur_entropy < 0.01:
                 #     temp += 0.1
                 #     print('low entropy! new temp:', temp)
-                #     breakpoint()
+                    # breakpoint()
 
                 # Gather statistics
                 total_log_probs += log_probs[selection].item()
@@ -189,6 +206,13 @@ def encode_arithmetic(model, enc, message, context, finish_sent=False, device='c
             print(num_bits)
             print()
 
+            # Heuristic for long contexts
+            # print("output len:", len(output))
+            # if len(output[len(context):]) % 200 == 0:
+            #     prev = output[-200:]
+            #     past = None
+            #     breakpoint()
+
             # For text->bits->text
             partial = enc.tokenizer.decode(output[len(context):].tolist())
             print("partial:", partial)
@@ -196,7 +220,33 @@ def encode_arithmetic(model, enc, message, context, finish_sent=False, device='c
                 break
 
             # time.sleep(2)
-            
+
+    # # Plot entropy over time
+    # plt.figure(figsize=(10, 4))
+    # plt.plot(entropy_over_time, label='Entropy')
+    # plt.xlabel('Step')
+    # plt.ylabel('Entropy')
+    # plt.title('Entropy over time')
+    # plt.legend()
+    # plt.grid(True)
+    # plt.tight_layout()
+    # plt.savefig("plot_entropy.png")
+    # plt.close
+
+    # # Plot probs_temp_int for top-10 tokens
+    # plt.figure(figsize=(12, 6))
+    # probs_array = list(zip(*probs_over_time))
+    # for i, probs in enumerate(probs_array):
+    #     plt.plot(probs, label=f'Token {i}: {token_labels[i]}')
+    # plt.xlabel('Step')
+    # plt.ylabel('Rounded Probability')
+    # plt.title('Top-10 token probabilities over time')
+    # plt.legend()
+    # plt.grid(True)
+    # plt.tight_layout()
+    # plt.savefig("plot_probs.png")
+    # plt.close
+
     avg_NLL = -total_log_probs/total_num_for_stats
     avg_KL = total_kl/total_num_for_stats
     avg_Hq = total_entropy_ptau/total_num_for_stats
@@ -311,7 +361,7 @@ def decode_arithmetic(model, enc, text, context, device='cuda', temp=1.0, precis
                 k = overfill_index[0].item()
 
             # Add any mass to the top if removing/rounding causes the total prob to be too small
-            cum_probs += cur_int_range-cum_probs[-1] # add
+            cum_probs[-1] += cur_int_range-cum_probs[-1] # add
 
             # Convert to position in range
             cum_probs += cur_interval[0]
@@ -350,8 +400,8 @@ def decode_arithmetic(model, enc, text, context, device='cuda', temp=1.0, precis
 
             # Heuristic for low entropy
             # if topk and cur_entropy < 0.01:
-            #     print('low entropy!', cur_entropy)
-            #     temp = min(temp + 0.1, 1.3)
+            #     temp += 0.1
+            #     print('low entropy! new temp:', temp)
             # elif topk:
             #     temp = 0.9
             # print()

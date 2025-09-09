@@ -3,7 +3,7 @@ import numpy as np
 import bitarray
 from PIL import Image
 
-from transformers import AutoModelForCausalLM, AutoTokenizer, AutoProcessor, Emu3ForConditionalGeneration, Emu3Processor
+from transformers import AutoModelForCausalLM, AutoTokenizer, AutoProcessor, Emu3ForConditionalGeneration, Emu3Processor, DynamicCache
 
 def decode(self, token_ids, **kwargs):
     filtered_tokens = self.convert_ids_to_tokens(token_ids)
@@ -75,7 +75,8 @@ def encode_image(image_path, model, enc):
 
     image = enc.image_processor.preprocess(image, return_tensors="pt")
     pixel_values = image["pixel_values"].to(torch.float16).cuda()
-    image_sizes = image["image_sizes"].cuda()
+    # image_sizes = image["image_sizes"].cuda()
+    image_sizes = torch.tensor([[64, 64]], device="cuda")
     height, width = image_sizes[0]
 
     with torch.no_grad():
