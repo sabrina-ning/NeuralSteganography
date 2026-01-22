@@ -5,3 +5,11 @@ data*
 generations/
 gpt345_data/
 pytorch-pretrained-BERT/
+.vscode/
+Emu3/
+images/
+logs/
+new_images/
+steg_venv/
+vocab/
+*.sh
