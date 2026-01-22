@@ -17,18 +17,25 @@ AutoTokenizer._convert_token_to_id = _convert_token_to_id
 
 
 # handles both old and new cache formats
-def limit_past(past):
+def limit_past(past, max_len=1022):
     past = list(past)
     for i in range(len(past)):
-        if isinstance(past[i], tuple):
+        if isinstance(past[i], tuple): # new
             key, value = past[i]
             past[i] = (
-                key[:, :, :, -1022:],
-                value[:, :, :, -1022:]
+                key[:, :, -max_len:, :],
+                value[:, :, -max_len:, :]
             )
-        else:
-            past[i] = past[i][:, :, :, -1022:]
-    return past
+        else: # old
+            past[i] = past[i][:, :, -max_len:, :]
+    return tuple(past)
+# def limit_past(past, max_len=1022):
+#     new_past = []
+#     for key, value in past:
+#         new_key = key[..., -max_len:, :]
+#         new_value = value[..., -max_len:, :]
+#         new_past.append((new_key, new_value))
+#     return tuple(new_past)
 
 def kl(q, logq, logp):
     res = q*(logq-logp)/0.69315
@@ -70,32 +77,32 @@ def encode_context(raw_text, enc):
 
 def encode_image(image_path, model, enc):
     image = Image.open(image_path).convert("RGB") # returns Image object
-    # width, height = image.size
+    width, height = image.size
     image_PIL = image
 
     image = enc.image_processor.preprocess(image, return_tensors="pt")
     pixel_values = image["pixel_values"].to(torch.float16).cuda()
-    # image_sizes = image["image_sizes"].cuda()
-    image_sizes = torch.tensor([[64, 64]], device="cuda")
-    height, width = image_sizes[0]
+    image_sizes = image["image_sizes"].cuda()
 
     with torch.no_grad():
         image_tokens = model.model.get_image_tokens(pixel_values, image_sizes).cuda() # pixel values -> tokens
     
-    start_token = torch.tensor([enc.tokenizer.image_wrapper_token_id], device="cuda")
+    # start_token = torch.tensor([enc.tokenizer.image_wrapper_token_id], device="cuda")
     end_tokens = torch.tensor([enc.tokenizer.eof_token_id, enc.tokenizer.eoi_token_id, enc.tokenizer.eos_token_id], device="cuda")
     # start_token = torch.tensor([151851], device="cuda")
     # end_tokens = torch.tensor([151847, 151853, 151850], device="cuda")
-    image_tokens = torch.cat([start_token, image_tokens, end_tokens])
+    image_tokens = torch.cat([image_tokens, end_tokens])
 
     return image_tokens, height, width, image_PIL
 
 def decode_image(image_tokens, height, width, model, enc):
     if not isinstance(image_tokens, torch.Tensor):
         image_tokens = torch.tensor(image_tokens, device="cuda")
+    print("spatial factor:", enc.image_processor.spatial_factor)
     image = model.model.decode_image_tokens(image_tokens.unsqueeze(0), # tokens -> pixel values
                                                 height=(height // enc.image_processor.spatial_factor), 
                                                 width=(width // enc.image_processor.spatial_factor))
+                                                # height=height, width=width)
     image = enc.image_processor.postprocess(image, return_tensors="PIL.Image.Image")['pixel_values'][0]
     return image
 
@@ -111,7 +118,7 @@ def get_model(seed=1234, model_name='gpt2'):
             model_name,
             trust_remote_code=True,
             device_map=device)
-    enc.image_processor.min_pixels = 64 * 64
+    enc.image_processor.min_pixels = 128 * 128
     
     if "hf" in model_name: # Emu3-Chat-hf or Emu3-Gen-hf
         model = Emu3ForConditionalGeneration.from_pretrained(

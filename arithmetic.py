@@ -305,8 +305,10 @@ def decode_arithmetic(model, enc, text, context, device='cuda', temp=1.0, precis
 
             cutoff_indices = (probs_temp < cur_threshold).nonzero()
             if len(cutoff_indices) > 0:
+                print('A')
                 k = max(2, cutoff_indices[0].item())
             else:
+                print('B')
                 k = len(probs_temp)
                 
             if topk:

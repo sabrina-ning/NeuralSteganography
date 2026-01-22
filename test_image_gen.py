@@ -17,7 +17,7 @@ np.set_printoptions(threshold=np.inf)
 model_id = "BAAI/Emu3-Gen-hf"
 model = Emu3ForConditionalGeneration.from_pretrained(
     model_id, 
-    torch_dtype=torch.float16, 
+    dtype=torch.float16, 
     low_cpu_mem_usage=True,
     device_map="cuda:0",
     # attn_implementation="flash_attention_2"
@@ -29,8 +29,10 @@ print("Processor:", type(processor))
 print("Tokenizer:", type(processor.tokenizer))
 
 seed = 12345
-# prompt_str = "a puppy"
-prompt_str = "San Francisco, officially the City and County of San Francisco, is a commercial, financial, and cultural center of Northern California. With a population of 827,526 residents as of 2024, San Francisco is the fourth-most populous city in the U.S. state of California and the 17th-most populous in the United States. San Francisco has a land area of 46.9 square miles (121 square kilometers) at the upper end of the San Francisco Peninsula and is the fifth-most densely populated U.S. county."
+prompt_str = "a puppy"
+# prompt_str = "San Francisco, officially the City and County of San Francisco, is a commercial, financial, and cultural center of Northern California. With a population of 827,526 residents as of 2024, San Francisco is the fourth-most populous city in the U.S. state of California and the 17th-most populous in the United States. San Francisco has a land area of 46.9 square miles (121 square kilometers) at the upper end of the San Francisco Peninsula and is the fifth-most densely populated U.S. county."
+# prompt_str = "Instagram is an American photo and short-form video sharing social networking service owned by Meta Platforms. It allows users to upload media that can be edited with filters, be organized by hashtags, and be associated with a location via geographical tagging. Posts can be shared publicly or with preapproved followers."
+# prompt_str = "A dog playing in the park"
 inputs = processor(
     text=[prompt_str],
     padding=True,
@@ -64,6 +66,13 @@ eoi_token_id = torch.tensor([processor.tokenizer.eoi_token_id], device=model.dev
 eos_token_id = torch.tensor([processor.tokenizer.eos_token_id], device=model.device)
 pad_token_id = torch.tensor([processor.tokenizer.pad_token_id], device=model.device)
 
+print("image wrapper:", image_wrapper_token_id)
+print("eol:", eol_token_id)
+print("eof:", eof_token_id)
+print("eoi:", eoi_token_id)
+print("eos:", eos_token_id)
+print("pad:", pad_token_id)
+
 ## ===== HELPER FUNCTIONS =====
 
 # enforce valid image structure for transformers `generate`
@@ -86,6 +95,9 @@ def prefix_allowed_tokens_fn(_, input_ids):
 
 # autoregressive generation using masking to disallow invalid tokens
 def generate_tokens(model, context, num_tokens, temp=1.0, top_k=2048):
+    print("context:", context)
+    breakpoint()
+
     prev = context
     output = context
     past = None
@@ -184,14 +196,14 @@ def reconstruct(image_tokens):
 
 # Generating
 
-print("="*40 + " image tokens " + "="*40)
-image_tokens = model_generate()
-print(image_tokens[0][0:20])
-print(image_tokens[0][-20:])
-print(image_tokens.shape)
-print("="*40)
+# print("="*40 + " image tokens " + "="*40)
+# image_tokens = model_generate()
+# print(image_tokens[0][0:20])
+# print(image_tokens[0][-20:])
+# print(image_tokens.shape)
+# print("="*40)
 
-torch.save(image_tokens, "image_tensor.pt")
+# torch.save(image_tokens, "image_tensor.pt")
 
 print("="*40 + " image tokens new " + "="*40)
 image_tokens_new = manual_generate()
@@ -208,12 +220,12 @@ torch.save(image_tokens_new, "image_tensor_new.pt")
 # image_tokens_new = torch.load("image_tensor_new.pt")
 # print(image_tokens_new.cpu().numpy())
 
-print(image_tokens[0].tolist() == image_tokens_new[0].tolist())
+# print(image_tokens[0].tolist() == image_tokens_new[0].tolist())
 
 # Decode visual tokens
-image_pixels = base_model.decode_image_tokens(image_tokens, height=height, width=width)
-image = processor.image_processor.postprocess(image_pixels, return_tensors="PIL.Image.Image")['pixel_values'][0]
-image.save("result.png")
+# image_pixels = base_model.decode_image_tokens(image_tokens, height=height, width=width)
+# image = processor.image_processor.postprocess(image_pixels, return_tensors="PIL.Image.Image")['pixel_values'][0]
+# image.save("result.png")
 
 image_pixels = base_model.decode_image_tokens(image_tokens_new, height=height, width=width)
 image = processor.image_processor.postprocess(image_pixels, return_tensors="PIL.Image.Image")['pixel_values'][0]
