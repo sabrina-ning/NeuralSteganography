@@ -118,7 +118,7 @@ def get_model(seed=1234, model_name='gpt2'):
             model_name,
             trust_remote_code=True,
             device_map=device)
-    enc.image_processor.min_pixels = 128 * 128
+    enc.image_processor.min_pixels = 256 * 256
     
     if "hf" in model_name: # Emu3-Chat-hf or Emu3-Gen-hf
         model = Emu3ForConditionalGeneration.from_pretrained(

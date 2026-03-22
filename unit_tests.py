@@ -561,10 +561,10 @@ def encode_decode_image(image_path):
     # Decode: visual tokens -> pixel values
     image_new = base_model.decode_image_tokens(image_tokens.unsqueeze(0), height=(height // downsample_ratio), width=(width // downsample_ratio))
     image_new = processor.image_processor.postprocess(image_new, return_tensors="PIL.Image.Image")['pixel_values'][0]
-    image_new.save("new_images/image_small_decoded.jpg")
+    image_new.save("new_images/image_decoded.jpg")
 
-enc.image_processor.min_pixels = 128 * 128
-encode_decode_image("new_images/touchdown_small.jpg")
+# enc.image_processor.min_pixels = 128 * 128 # default: 512 * 512
+# encode_decode_image("new_images/touchdown.jpg")
 # encode_decode_image("images/fruits.jpg")
 # encode_decode_image("images/cat.jpg")
 # encode_decode_image("images/cornell.jpg")
