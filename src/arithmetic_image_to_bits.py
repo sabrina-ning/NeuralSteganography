@@ -1,13 +1,16 @@
+"""Image token arithmetic coding to and from bit-strings.
+
+Provides arithmetic encoding and decoding routines to convert between discrete
+image tokens (or secret messages) and compact uniform bitstreams using an autoregressive model.
+"""
+
 import torch
 import torch.nn.functional as F
 from transformers import DynamicCache
-import time
-# import numpy as np
-# import matplotlib.pyplot as plt
 
-from utils import limit_past, kl, entropy, bits2int, int2bits, is_sent_finish, num_same_from_beg, is_cit
+from src.utils import limit_past, kl, entropy, bits2int, int2bits, is_sent_finish, num_same_from_beg, is_cit
 
-def encode_arithmetic(model, enc, message, context, finish_sent=False, device='cuda', temp=1.0, precision=16, topk=None):
+def encode_arithmetic_from_bits(model, enc, message, context, finish_sent=False, device='cuda', temp=1.0, precision=16, topk=None):
     context = torch.tensor(context, device=device, dtype=torch.long)
 
     max_val = 2**precision
@@ -32,14 +35,9 @@ def encode_arithmetic(model, enc, message, context, finish_sent=False, device='c
         i = 0
         sent_finish = False
         while i < len(message) or (finish_sent and not sent_finish):
-        # while i < 800:
-            print()
-
             out = model(input_ids=prev.unsqueeze(0), past_key_values=past, use_cache=True)
             logits = out.logits
             past = out.past_key_values
-
-            # breakpoint()
 
             # logits[0, -1, 151643] = -1e4 # endoftext can't happen
             # logits[0, -1, 151850] = -1e4 # endofsequence can't happen
@@ -206,6 +204,10 @@ def encode_arithmetic(model, enc, message, context, finish_sent=False, device='c
             print(num_bits)
             print()
 
+            if enc.tokenizer.decode(prev) == "<|extra_203|>":
+                output = output[:-1] # truncate to last image token <|extra_204|>, get rid of end-of-sequence token
+                break
+
             # Heuristic for long contexts
             # print("output len:", len(output))
             # if len(output[len(context):]) % 200 == 0:
@@ -214,10 +216,10 @@ def encode_arithmetic(model, enc, message, context, finish_sent=False, device='c
             #     breakpoint()
 
             # For text->bits->text
-            partial = enc.tokenizer.decode(output[len(context):].tolist())
-            print("partial:", partial)
-            if '<eos>' in partial:
-                break
+            # partial = enc.tokenizer.decode(output[len(context):].tolist())
+            # print("partial:", partial)
+            # if '<eos>' in partial:
+            #     break
 
             # time.sleep(2)
 
@@ -257,7 +259,7 @@ def encode_arithmetic(model, enc, message, context, finish_sent=False, device='c
 
     return out, avg_NLL, avg_KL, words_per_bit, avg_Hq
 
-def decode_arithmetic(model, enc, text, context, device='cuda', temp=1.0, precision=16, topk=None):
+def decode_arithmetic_to_bits(model, enc, text, context, device='cuda', temp=1.0, precision=16, topk=None):
     # inp is a list of token indices
     # context is a list of token indices
 
@@ -305,10 +307,8 @@ def decode_arithmetic(model, enc, text, context, device='cuda', temp=1.0, precis
 
             cutoff_indices = (probs_temp < cur_threshold).nonzero()
             if len(cutoff_indices) > 0:
-                print('A')
                 k = max(2, cutoff_indices[0].item())
             else:
-                print('B')
                 k = len(probs_temp)
                 
             if topk:
@@ -371,7 +371,14 @@ def decode_arithmetic(model, enc, text, context, device='cuda', temp=1.0, precis
             rank = (indices == inp[i]).nonzero().item()
 
             if rank >= k:
-                print('Error: tokenization inconsistency, rank >= k')
+                tok_id = inp[i] if not torch.is_tensor(inp[i]) else inp[i].item()
+                raise RuntimeError(
+                    f"Entropy model assigned token {tok_id} probability below "
+                    f"cutoff 2^-{precision} (rank={rank}, k={k}, position={i}/{len(inp)}). "
+                    f"Either raise `precision`, or the LM is a poor entropy "
+                    f"model for this token (e.g. masked image-generation "
+                    f"logits in facebook/chameleon-7b — try Anole)."
+                )
             
             selection = rank
             
