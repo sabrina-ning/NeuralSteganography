@@ -1,15 +1,27 @@
-*~
-.ipynb_checkpoints
-__pycache__
-data*
-generations/
-gpt345_data/
-pytorch-pretrained-BERT/
-.vscode/
-Emu3/
-images/
-logs/
-new_images/
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Data & models
+data/
+
+# Virtual environments
 steg_venv/
-vocab/
-*.sh
+*_venv/
+
+# IDE
+.vscode/
+.claude/
+
+# Generated outputs
+output_images/*.png
+output_images/*.jpg
+output_images/*.pt
+robustness_results/*.png
+
+# SLURM output
+*.out
+
+# Large intermediates
+*.pt
